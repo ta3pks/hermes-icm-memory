@@ -75,10 +75,6 @@ def _extract_keywords(text: str) -> list[str]:
     return out
 
 
-def _truncate(text: str) -> str:
-    return text if len(text) <= _CONTENT_LIMIT else text[:_CONTENT_LIMIT]
-
-
 def detect_triggers(
     user_text: str,
     assistant_text: str,
@@ -111,7 +107,7 @@ def detect_triggers(
     # 1. Periodic context — fires every N turns, never on turn_index == 0.
     if every_n_turns > 0 and turn_index > 0 and turn_index % every_n_turns == 0:
         topic = _resolve_topic("context", project)
-        content = _truncate(f"periodic progress checkpoint: turn {turn_index}")
+        content = f"periodic progress checkpoint: turn {turn_index}"
         out.append((topic, MAPPING["context"]["importance"], content, []))
 
     # 2. errors-resolved (assistant_text).
@@ -120,7 +116,7 @@ def detect_triggers(
             (
                 _resolve_topic("errors-resolved", project),
                 MAPPING["errors-resolved"]["importance"],
-                _truncate(assistant_text),
+                assistant_text[:_CONTENT_LIMIT],
                 _extract_keywords(assistant_text),
             )
         )
@@ -131,7 +127,7 @@ def detect_triggers(
             (
                 _resolve_topic("decisions", project),
                 MAPPING["decisions"]["importance"],
-                _truncate(assistant_text),
+                assistant_text[:_CONTENT_LIMIT],
                 _extract_keywords(assistant_text),
             )
         )
@@ -142,7 +138,7 @@ def detect_triggers(
             (
                 _resolve_topic("learnings", project),
                 MAPPING["learnings"]["importance"],
-                _truncate(assistant_text),
+                assistant_text[:_CONTENT_LIMIT],
                 _extract_keywords(assistant_text),
             )
         )
@@ -153,7 +149,7 @@ def detect_triggers(
             (
                 _resolve_topic("preferences", project),
                 MAPPING["preferences"]["importance"],
-                _truncate(user_text),
+                user_text[:_CONTENT_LIMIT],
                 _extract_keywords(user_text),
             )
         )

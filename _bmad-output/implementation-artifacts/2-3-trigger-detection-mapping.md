@@ -1,6 +1,6 @@
 # Story 2.3: Trigger detection mapping
 
-Status: review
+Status: done
 Story ID: S06 · Epic: 2 (ICM adapter core) · Effort: S · Dependencies: S01
 
 ## Story
@@ -297,3 +297,4 @@ Claude Opus 4.7 (BMAD dev-story phase, S06).
 | 2026-05-06 | Story drafted (Phase 1 / `/bmad-create-story`): ACs, test plan, file spec, dev notes locked.                    |
 | 2026-05-06 | Phase 2 dev-story: TDD RED → GREEN. 9 tests pass, mapping.py 95 % line+branch, ruff + mypy --strict clean.       |
 | 2026-05-06 | Phase 3 code-review (Blind Hunter + Edge Case Hunter + Acceptance Auditor): Acceptance Auditor PASS, no AC violations. Blind Hunter clean (str.format ignoring extra kwargs is safe; apostrophes work with `\b`). Edge Case Hunter clean (empty strings → []; `every_n_turns == 0` guarded; `turn_index <= 0` filtered; unicode-aware `\b`). One LOW finding flagged for simplify: `_truncate` is a one-line helper that inlines to `text[:_CONTENT_LIMIT]` cleanly (slicing is a no-op when shorter than the cap). Status: review → Phase 4. |
+| 2026-05-06 | Phase 4 simplify pass: applied the LOW finding — removed the `_truncate` helper, inlined `text[:_CONTENT_LIMIT]` at the three callsites (Python slicing is a no-op when the string is shorter, so the helper added a function frame for nothing). mapping.py drops from 44→42 stmts, coverage stays at 95 % line+branch (gate 85 %), ruff + mypy --strict still clean, all 9 tests still pass. No other reuse / quality / efficiency findings — the rest of the module is appropriately minimal. |
