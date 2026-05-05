@@ -1,6 +1,6 @@
 # Story 2.1: Typed errors + CLI runner (read & write paths)
 
-Status: draft
+Status: ready-for-dev
 Story ID: S04 · Epic: 2 (ICM adapter core) · Effort: M · Dependencies: S01
 
 ## Story
@@ -39,13 +39,13 @@ so that v2's MCP-transport swap touches one file (NFR-MAINT-2) and every failure
   the function returns `None` regardless of stdout content,
   and the same four typed exceptions are raised on the matching failure modes (no JSON parse path — `ICMMalformedOutputError` does not apply to writes).
 
-**AC4 — `run_topics` and `run_health` invoke their JSON subcommands**
+**AC4 — `run_topics` and `run_health` use line-split parsing (NOT `--format json`)**
 
-- **Given** `run_topics(db_path, timeout_ms)` → argv is `["icm", "--db", str(db_path), "topics", "--format", "json"]`; on success returns the parsed list.
-- **Given** `run_health(db_path, timeout_ms, topic=None)` → argv is `["icm", "--db", str(db_path), "health", "--format", "json"]` with `["-t", topic]` appended only when supplied; on success returns the parsed dict.
-- Failure modes (not-found / timeout / nonzero / malformed) match AC2.
+- **Given** `run_topics(db_path, timeout_ms)` → argv is `["icm", "--db", str(db_path), "topics"]` (no `--format json`); on success the aligned-table stdout is parsed by splitting each non-empty line on `\s{2,}`, the first row used as header, returning `list[dict[str, Any]]` keyed by header column names (lower-cased, spaces → underscores). Single-column output falls back to `[{"topic": <line>}, ...]`.
+- **Given** `run_health(db_path, timeout_ms, topic=None)` → argv is `["icm", "--db", str(db_path), "health"]` (no `--format json`) with `["-t", topic]` appended only when supplied; on success the `key: value` line output is parsed into `dict[str, Any]` with keys lower-cased and spaces → underscores. If non-blank stdout produces zero parseable lines, raises `ICMMalformedOutputError`.
+- Failure modes (not-found / timeout / nonzero) match AC2.
 
-> **Reality-check note (does NOT change the spec for S04):** the team-lead briefing flagged that `icm 0.10.43` does not actually support `--format json` for `topics` / `health`; line-split table parsing is required in production. **This story builds and tests the `--format json` argv shape** because the architecture spec (§6.1) and the binding S04 test plan in epics-and-stories.md both lock that argv shape, and the AST/integration tests in S11/S14 are what will surface the real-CLI mismatch. A follow-up bridge (table-parse fallback) is explicitly **out of scope** for S04 and will be filed as a separate change against `cli_runner.py` once S11/S14 land. See "Deviations" in the Dev Agent Record after implementation.
+> **Manager directive (binding):** verified on `icm 0.10.43` — `--format json` is only supported for `icm recall`, NOT for `icm topics` or `icm health`. Architecture §6.1's "fallback" for those two subcommands is therefore the **only** path on the installed runtime. Do **not** pass `--format json` to `topics` / `health`. The line-split parser shapes its return value to match what JSON would have given (list of dicts; key/value dict).
 
 **AC5 — DEBUG log emitted with redacted argv + elapsed milliseconds**
 
@@ -167,8 +167,8 @@ The 13 tests:
 | 7   | `test_run_recall_raises_malformed`                              | `returncode=0`, `stdout="not json"` → `ICMMalformedOutputError`; first 200 chars of stdout appear in the message.                                     | AC2        |
 | 8   | `test_run_store_argv_shape`                                     | argv is `["icm", "--db", "<p>", "store", "-t", "<topic>", "-c", "<content>", "-i", "<importance>"]`; `-k`/`-r` only appear when supplied.             | AC3        |
 | 9   | `test_run_store_does_not_parse_stdout`                          | mock stdout is gibberish; `run_store` returns `None` and does not raise.                                                                              | AC3        |
-| 10  | `test_run_topics_argv_and_parse`                                | argv is `["icm", "--db", "<p>", "topics", "--format", "json"]`; mock stdout `'["a","b"]'` → return `["a", "b"]`.                                       | AC4        |
-| 11  | `test_run_health_argv_with_topic`                               | argv ends with `"-t", "<topic>"` when supplied; mock stdout `'{"status":"ok"}'` → return `{"status": "ok"}`.                                          | AC4        |
+| 10  | `test_run_topics_argv_and_parse`                                | argv is `["icm", "--db", "<p>", "topics"]` (NO `--format json`); aligned-table stdout (e.g. `"Topic            Count\nerrors-resolved  3"`) → list of dicts containing those rows by lower-cased header keys. | AC4        |
+| 11  | `test_run_health_argv_with_topic`                               | argv is `["icm", "--db", "<p>", "health", "-t", "<topic>"]` (NO `--format json`); `key: value`-line stdout (e.g. `"Total memories: 42\nStale: 0"`) → dict containing those keys (lower-cased, spaces → `_`). | AC4        |
 | 12  | `test_debug_log_emits_redacted_argv`                            | `caplog.set_level("DEBUG")`; query of length 81 → DEBUG log contains the truncated form ending in `"…"`; query of length 80 → no truncation marker.    | AC5        |
 | 13  | `test_subprocess_invoked_with_shell_false_and_timeout`          | inspects `subprocess.run.call_args.kwargs`; asserts `shell=False`, `check=False`, `capture_output=True`, `text=True`, `timeout == timeout_ms / 1000`. | AC6        |
 
@@ -206,7 +206,7 @@ The 13 tests:
 ### Common LLM-developer pitfalls (avoid)
 
 - **Don't combine errors and cli_runner into one module.** Architecture §4.1 invariant 3 requires `errors.py` to import nothing from this package; merging would force a circular-import workaround later.
-- **Don't add a `--format json` fallback / table parser** to `topics` / `health` in this story. The architecture spec locks the JSON-format argv shape; the line-split parser is a follow-up after S11/S14 surface the mismatch. See AC4 reality-check note.
+- **Do NOT pass `--format json` to `topics` / `health`.** Manager-verified: only `icm recall` supports it on `icm 0.10.43`. The line-split parser is the *only* implementation path for `run_topics` / `run_health` and is part of S04's scope (AC4). Architecture §6.1 wording labelled it a "fallback" but the JSON path is unreachable on the installed runtime — treat it as the primary parser.
 - **Don't import `subprocess` in `errors.py` or anywhere else under `hermes_icm_memory/`.** S11's AST test will fail; even before S11 lands, we keep the invariant by hand.
 - **Don't call `icm init` from `cli_runner.py`.** AD-06: the plugin never invokes `icm init`. The four `run_*` functions are read/write only.
 - **Don't truncate flag values like `--limit`** in the DEBUG redactor. The redactor is positional / length-based: anything > 80 chars gets clipped, regardless of whether it's a flag value or a positional. Test #12 only exercises the long-`query` case; flag truncation is acceptable as a degenerate side effect (no PII-relevant flag value is > 80 chars in practice).
@@ -267,3 +267,4 @@ Claude Opus (BMAD dev-story phase, S04 lane).
 | Date       | Change                                                                                                  |
 |------------|---------------------------------------------------------------------------------------------------------|
 | 2026-05-06 | S04 story spec drafted from epics-and-stories.md §Story 2.1.                                            |
+| 2026-05-06 | AC4 + test #10/#11 + pitfall realigned with manager directive: `--format json` is recall-only on `icm 0.10.43`; line-split parsing is the binding implementation path for `topics` / `health`. Status flipped to `ready-for-dev`. |
