@@ -39,6 +39,7 @@ hermes_home/
 .env.local
 
 # BMAD scratch (track planning-artifacts/ as core docs; rest is process-internal)
+_bmad/
 _bmad-output/test-artifacts/
 .claude/worktrees/
 
