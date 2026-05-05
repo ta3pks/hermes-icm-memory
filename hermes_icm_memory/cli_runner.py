@@ -78,6 +78,8 @@ def _run(argv: list[str], timeout_ms: int) -> subprocess.CompletedProcess[str]:
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_ms / 1000,
             check=False,
             shell=False,
@@ -215,7 +217,12 @@ def _normalize_key(raw: str) -> str:
 
 
 def _parse_topics_table(stdout: str) -> list[dict[str, Any]]:
-    """Convert ``icm topics`` aligned-table stdout into ``list[dict]``."""
+    """Convert ``icm topics`` aligned-table stdout into ``list[dict]``.
+
+    The exact aligned-table format is speculative against icm 0.10.43;
+    real-binary verification is S14 (integration tests). On unrecognized
+    formats we degrade to the single-column fallback rather than raising.
+    """
     lines = [line for line in stdout.splitlines() if line.strip()]
     if not lines:
         return []
