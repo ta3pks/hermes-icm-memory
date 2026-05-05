@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+.hypothesis/
+
+# Hermes/ICM runtime data
+hermes_home/
+.hermes/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local secrets / env
+.env
+.env.local
+
+# BMAD planning + execution artifacts (project-local, not core deliverable)
+_bmad-output/
+.claude/worktrees/
+
+# OS
+Thumbs.db
