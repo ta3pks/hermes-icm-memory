@@ -1,6 +1,6 @@
 # Story 4.1: Hooks (`prefetch`, `system_prompt_block`, `sync_turn`, `on_session_end`) + bounded-queue worker
 
-Status: in_progress
+Status: done
 Story ID: S08 · Epic: 4 (Memory operations) · Effort: L · Dependencies: S04 (cli_runner, errors), S06 (mapping), S07 (provider)
 
 ## Story
@@ -116,15 +116,13 @@ so that my agent acts informed and never pays turn-perceptible latency for memor
 ## Tasks / Subtasks
 
 - [x] **Task 1 — Story spec (Phase 1 / `/bmad-create-story`)**
-  - Capture sixteen ACs above, map each to a test in the test plan, freeze the file spec.
-- [ ] **Task 2 — Phase 2 / `/bmad-dev-story` (TDD)**
-  - RED: write `tests/test_hooks.py` with sixteen TDD cases (AC1–AC16).
-  - GREEN: implement `hermes_icm_memory/hooks.py` (worker + helpers) and bind methods on `IcmMemoryProvider` (`prefetch`, `system_prompt_block`, `sync_turn`, `on_session_end`).
-  - Verify: 91 passed, 3 skipped (existing baseline 75 + 16 new); coverage ≥ 85 % overall, ≥ 95 % for `hooks.py`; ruff + mypy --strict clean.
-- [ ] **Task 3 — Phase 3 / `/bmad-code-review`**
-  - Adversarial pass (Blind Hunter + Edge Case Hunter + Acceptance Auditor) on hooks.py and provider.py delta.
-- [ ] **Task 4 — Phase 4 / `/simplify`**
-  - Reuse / quality / efficiency review on the new code.
+  - Captured sixteen ACs, mapped each to a test in the test plan, froze the file spec.
+- [x] **Task 2 — Phase 2 / `/bmad-dev-story` (TDD)**
+  - RED → GREEN: 16 ACs + 7 defensive coverage cases in `tests/test_hooks.py`. hooks.py + provider.py implemented.
+- [x] **Task 3 — Phase 3 / `/bmad-code-review`**
+  - PASS, zero findings. All 16 ACs trace 1-to-1 to passing tests.
+- [x] **Task 4 — Phase 4 / `/simplify`**
+  - Three findings applied (`_DEFAULT_CONFIG` dict, property types, redundant short-circuit dropped); two skipped with rationale.
 
 ## File Spec
 
@@ -411,3 +409,4 @@ Claude Opus 4.7 (BMAD dev-story phase, S08).
 | 2026-05-06 | Story drafted (Phase 1 / `/bmad-create-story`): sixteen ACs, sixteen-test plan, file spec, dev notes locked. |
 | 2026-05-06 | Phase 2 dev-story: TDD RED → GREEN. 16 ACs pass + 7 defensive coverage tests = 23 cases in `tests/test_hooks.py`. hooks.py 98 % line+branch (gate 85 %), provider.py 93 %, package 95.50 %, ruff + mypy --strict clean. Suite at 98 passed, 3 skipped. p95 sync_turn = 1.945 ms (median 1.419 ms). |
 | 2026-05-06 | Phase 3 code-review (Blind Hunter + Edge Case Hunter + Acceptance Auditor): **PASS, zero findings**. All 16 ACs trace to a passing test; cross-cutting invariants honored; edge cases (uninit'd `sync_turn`/`system_prompt_block`/`on_session_end`, `prefetch_enabled=False`, defensive non-ICMError catch, `_writes_disabled` short-circuit) all covered. |
+| 2026-05-06 | Phase 4 simplify pass: applied three findings — (a) added module-level `_DEFAULT_CONFIG` dict materialised once from `config.get_default_schema()`, collapsing the per-call linear schema walk in `_config_int`/`_config_bool` to a single dict lookup; provider.py shrank 134 → 127 stmts; (b) tightened the three property type aliases (`_write_queue`, `_worker`, `_stop_event`) from `Any` to proper types (`queue.Queue[hooks.WriteTask] | None` / `threading.Thread | None` / `threading.Event`), strengthening mypy --strict guarantees; (c) dropped the redundant `if not hits: return ""` short-circuit in `prefetch` since `format_block` already returns `""` on empty hits. Skipped two reviewer suggestions: (i) inlining the 6 worker-state properties into direct `_worker_state.x` accesses (the test interface relies on the underscore-prefixed attribute names), (ii) collapsing the 4 outer `try/except Exception` boundaries on `prefetch`/`system_prompt_block`/`sync_turn`/`on_session_end` into a decorator (the inner helpers already swallow; AD-07 boundary discipline calls for the explicit, per-method outer catch). 98 passed / 3 skipped, hooks.py 98 % / provider.py 92 % / package 95.37 %, ruff + mypy --strict clean. |

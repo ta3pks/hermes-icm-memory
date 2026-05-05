@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import shutil
+import threading
 from pathlib import Path
 from typing import Any, Final
 
@@ -30,6 +32,13 @@ _TOOL_UNAVAILABLE_JSON: Final[str] = json.dumps({"error": "tool unavailable"})
 
 #: Filename of the JSON sidecar persisted under ``<hermes_home>/icm/``.
 _CONFIG_SIDECAR_NAME: Final[str] = "config.json"
+
+#: Frozen architecture §10.1 defaults, materialised once. Avoids the per-call
+#: deep-copy in :meth:`IcmMemoryProvider._cfg` (otherwise ``sync_turn`` would
+#: pay an O(N) copy of the schema list every turn).
+_DEFAULT_CONFIG: Final[dict[str, Any]] = {
+    entry["key"]: entry["default"] for entry in config.get_default_schema()
+}
 
 
 class IcmMemoryProvider:
@@ -180,34 +189,24 @@ class IcmMemoryProvider:
 
     def _config_int(self, key: str) -> int:
         """Read an int config value (caller-saved override or schema default)."""
-        if key in self._config:
-            return int(self._config[key])
-        for entry in config.get_default_schema():
-            if entry["key"] == key:
-                return int(entry["default"])
-        raise KeyError(f"config key not in schema: {key}")  # pragma: no cover
+        return int(self._config.get(key, _DEFAULT_CONFIG[key]))
 
     def _config_bool(self, key: str) -> bool:
         """Read a bool config value (caller-saved override or schema default)."""
-        if key in self._config:
-            return bool(self._config[key])
-        for entry in config.get_default_schema():
-            if entry["key"] == key:
-                return bool(entry["default"])
-        raise KeyError(f"config key not in schema: {key}")  # pragma: no cover
+        return bool(self._config.get(key, _DEFAULT_CONFIG[key]))
 
     # State exposed on the provider (read-only properties + one mutable list).
 
     @property
-    def _write_queue(self) -> Any:  # queue.Queue[hooks.WriteTask] | None
+    def _write_queue(self) -> queue.Queue[hooks.WriteTask] | None:
         return self._worker_state.write_queue
 
     @property
-    def _worker(self) -> Any:  # threading.Thread | None
+    def _worker(self) -> threading.Thread | None:
         return self._worker_state.worker
 
     @property
-    def _stop_event(self) -> Any:  # threading.Event
+    def _stop_event(self) -> threading.Event:
         return self._worker_state.stop_event
 
     @property
@@ -247,7 +246,7 @@ class IcmMemoryProvider:
         if not self.is_available() or self._db_path is None:
             return ""
         try:
-            hits = hooks.run_prefetch(
+            hooks.run_prefetch(
                 query=query,
                 db_path=self._db_path,
                 limit=self._config_int("recall_limit"),
@@ -260,8 +259,7 @@ class IcmMemoryProvider:
             )
             return ""
         self._latest_prefetch_key = hash(query)
-        if not hits:
-            return ""
+        # ``format_block`` returns ``""`` on empty hits — no extra short-circuit.
         return hooks.format_block(
             cache=self._prefetch_cache,
             latest_key=self._latest_prefetch_key,
