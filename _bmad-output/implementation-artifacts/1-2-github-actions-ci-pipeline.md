@@ -1,6 +1,6 @@
 # Story 1.2: GitHub Actions CI pipeline
 
-Status: draft
+Status: review
 Story ID: S02 · Epic: 1 (Plugin foundation) · Effort: S · Dependencies: S01
 
 ## Story
@@ -51,19 +51,19 @@ so that quality regressions are caught before merge and Sprint-2 deliverables (N
 
 > **TDD discipline (mandatory):** every code task is preceded by writing the failing test for it. Run `pytest tests/test_ci_workflow.py -q --no-cov` after writing tests but before writing impl, and confirm all 3 FAIL. Only then write `.github/workflows/ci.yml`.
 
-- [ ] **Task 1 — Write the 3 failing tests (AC1, AC3, AC4, AC5, AC6)**
-  - [ ] 1.1 Create `tests/test_ci_workflow.py` containing the 3 tests from §Test Plan (verbatim names). Use `yaml.safe_load` on the workflow file; locate the file via `pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"`.
-  - [ ] 1.2 Confirm `pytest tests/test_ci_workflow.py -q --no-cov` reports 3 collected, 3 failed (file missing). Capture in Dev Agent Record.
+- [x] **Task 1 — Write the 3 failing tests (AC1, AC3, AC4, AC5, AC6)**
+  - [x] 1.1 Create `tests/test_ci_workflow.py` containing the 3 tests from §Test Plan (verbatim names). Use `yaml.safe_load` on the workflow file; locate the file via `pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"`.
+  - [x] 1.2 Confirm `pytest tests/test_ci_workflow.py -q --no-cov` reports 3 collected, 3 failed (file missing). Captured in Dev Agent Record.
 
-- [ ] **Task 2 — Implement `.github/workflows/ci.yml` (AC1–AC6)**
-  - [ ] 2.1 Create the workflow per §File Spec.
-  - [ ] 2.2 Re-run `pytest tests/test_ci_workflow.py -q --no-cov`. All three pass.
+- [x] **Task 2 — Implement `.github/workflows/ci.yml` (AC1–AC6)**
+  - [x] 2.1 Create the workflow per §File Spec.
+  - [x] 2.2 Re-run `pytest tests/test_ci_workflow.py -q --no-cov`. All three pass.
 
-- [ ] **Task 3 — Quality gates (all six ACs)**
-  - [ ] 3.1 `ruff check .` → 0 issues (no source change here, but a regression check).
-  - [ ] 3.2 `mypy --strict hermes_icm_memory tests` → 0 errors (the new test file is type-checked too).
-  - [ ] 3.3 `pytest --cov=hermes_icm_memory --cov-branch --cov-fail-under=85` → all green; coverage stays ≥ 85 %.
-  - [ ] 3.4 Commit on branch `s02`. Conventional message: `feat(S02): GitHub Actions CI pipeline (3.11 + 3.12, ruff + mypy + pytest)`.
+- [x] **Task 3 — Quality gates (all six ACs)**
+  - [x] 3.1 `ruff check .` → 0 issues.
+  - [x] 3.2 `mypy --strict hermes_icm_memory tests` → 0 errors.
+  - [x] 3.3 `pytest --cov=hermes_icm_memory --cov-branch --cov-fail-under=85` → all green; coverage 93 %.
+  - [x] 3.4 Commit on branch `s02`.
 
 ## File Spec (authoritative — copy-paste boilerplate intent, not literal)
 
@@ -205,18 +205,29 @@ Claude Opus (BMAD dev-story phase, S02 lane).
 
 ### Debug Log References
 
-(populated in Phase 2)
+- **RED phase:** wrote `tests/test_ci_workflow.py` with the 3 named tests. Ran `python -m pytest tests/test_ci_workflow.py -v --no-cov` → 3 collected, 3 failed with `FileNotFoundError` from `Path.read_text()` against the missing `.github/workflows/ci.yml` (impl missing — expected).
+- **GREEN phase:** created `.github/workflows/ci.yml` per §File Spec. Re-ran pytest → 3/3 passed; full suite `python -m pytest tests/` → 35 passed, 3 skipped (S11 invariant tests for not-yet-existing modules), coverage 93 %.
+- **mypy follow-up:** `--strict` flagged `dict.get(True)` as a `call-overload` violation since the workflow root is typed `dict[str, Any]`. Fixed by binding the workflow to a `dict[Any, Any]` local before the bool-key probe (PyYAML's `on:` → `True` footgun is now type-clean). No semantic change.
 
 ### Completion Notes List
 
-(populated in Phase 2)
+- All 6 acceptance criteria satisfied (AC1–AC6).
+- Strict TDD: 3 tests written first, RED `FileNotFoundError` confirmed, then minimal impl to GREEN.
+- Manager directive honored: `cargo install --git https://github.com/rtk-ai/icm.git icm` is the install path; `continue-on-error: true` is on `Install icm` only. Lint / mypy / pytest still gate. Integration tests (S14) self-skip when `icm` is unavailable.
+- Caching added beyond the planner's sketch: `cache: pip` on `setup-python@v5` and `Swatinem/rust-cache@v2` for cargo. Reduces cold ~5–10 min icm build to ~10–30 s on cache hits.
+- `fail-fast: false` so 3.11 + 3.12 jobs report independently.
+- Coverage gate is invoked both ways (planner-acceptable): explicit `--cov-fail-under=85` in the workflow's pytest step AND in `pyproject.toml`'s `addopts`. Belt-and-braces — keeps the workflow self-documenting.
+- No deviations from spec.
 
 ### File List
 
-(populated in Phase 2)
+- `.github/workflows/ci.yml` (NEW) — CI workflow: checkout → setup-python (matrix 3.11/3.12) → setup-rust + cargo cache → `Install icm` (continue-on-error) → `Install package` → ruff → mypy --strict → pytest --cov-fail-under=85.
+- `tests/test_ci_workflow.py` (NEW) — 3 YAML-parse tests (`test_workflow_yaml_shape`, `test_workflow_installs_icm`, `test_workflow_runs_pytest_with_coverage_gate`).
+- `_bmad-output/implementation-artifacts/1-2-github-actions-ci-pipeline.md` (MODIFIED) — Phase 1 spec drafted, Phase 2 dev-agent record added.
 
 ### Change Log
 
 | Date       | Change                                                                                                  |
 |------------|---------------------------------------------------------------------------------------------------------|
 | 2026-05-06 | S02 story spec drafted from epics-and-stories.md §Story 1.2 + manager directive (cargo install + caching + continue-on-error). Status: draft → ready-for-dev. |
+| 2026-05-06 | Phase 2 dev-story: 3 tests authored RED-first, `.github/workflows/ci.yml` implemented GREEN. 35/35 unit tests pass (3 integration skipped pending `icm`), coverage 93 %, ruff clean, mypy `--strict` clean. Status flipped to `review`. |
