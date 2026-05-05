@@ -58,6 +58,8 @@ def test_ast_walker_detects_subprocess_imports() -> None:
     assert _imports_subprocess("import subprocess as sp\n") is True
     assert _imports_subprocess("from subprocess import run\n") is True
     assert _imports_subprocess("from subprocess import run, PIPE\n") is True
+    assert _imports_subprocess("from subprocess import *\n") is True
+    assert _imports_subprocess("import subprocess.constants\n") is True
     # Benign code must not trigger.
     assert _imports_subprocess("import os\n") is False
     assert _imports_subprocess("from os import path\n") is False

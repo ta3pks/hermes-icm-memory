@@ -215,3 +215,4 @@ Claude Opus (BMAD dev-story phase, hermes-icm s11 teammate)
 |------------|--------|
 | 2026-05-06 | S11 story spec drafted (Phase 1 — bmad-create-story). Forward-compat design: skipif Option A. |
 | 2026-05-06 | S11 implementation (Phase 2 — bmad-dev-story): 3 new test files, 9 new tests (6 active + 3 skipif). RED-confirm via temporary invariant violation. Skipif-flip verified by temporarily adding lifecycle methods. 10 passed, 3 skipped, ruff + mypy --strict clean, coverage 100 %. |
+| 2026-05-06 | Phase 3 code-review (Blind Hunter + Edge Case Hunter + Acceptance Auditor): Acceptance Auditor PASS, no AC violations. Patches applied: (1) `_raise_on_socket` return-type changed from `socket.socket` to `NoReturn` (function always raises — type hint now matches reality); (2) AST-walker negative-control extended to `from subprocess import *` and `import subprocess.constants` so the catch-coverage of submodule + star-import is asserted explicitly. No deferrals. |

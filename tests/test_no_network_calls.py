@@ -18,7 +18,7 @@ lands the methods, requiring no follow-up edit to this file.
 from __future__ import annotations
 
 import socket
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -54,7 +54,7 @@ _SKIP_REASON = (
 )
 
 
-def _raise_on_socket(*args: object, **kwargs: object) -> socket.socket:
+def _raise_on_socket(*args: object, **kwargs: object) -> NoReturn:
     raise RuntimeError("network forbidden during plugin lifecycle (NFR-SEC-1)")
 
 
