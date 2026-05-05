@@ -1,6 +1,6 @@
 # Story 5.1: Architectural invariant tests (subprocess, dot-cache, network)
 
-Status: draft
+Status: review
 Story ID: S11 · Epic: 5 (Quality guardrails & integration) · Effort: S · Dependencies: S01
 
 ## Story
@@ -39,33 +39,33 @@ so that NFR-MAINT-2 (subprocess isolation), FR2 (path injection), and NFR-SEC-1 
 
 > **TDD discipline:** these stories ARE tests. The tests are simultaneously the impl and the spec. Run each test once with the invariant intentionally violated (introduce a temporary `import subprocess` somewhere, or a stray `"~/.hermes"`) to confirm RED before reverting; then confirm GREEN.
 
-- [ ] **Task 1 — `tests/test_no_subprocess_outside_cli_runner.py` (AC1)**
-  - [ ] 1.1 Walk `hermes_icm_memory/` for every `*.py` file (use `pathlib.Path.rglob`).
-  - [ ] 1.2 For each file, parse with `ast.parse(path.read_text(encoding="utf-8"))`.
-  - [ ] 1.3 Walk the AST and collect any `ast.Import` whose alias name is `subprocess` OR any `ast.ImportFrom` whose module is `subprocess`.
-  - [ ] 1.4 Assert the offending list is empty *unless* the file is `cli_runner.py`.
-  - [ ] 1.5 Negative-control sub-test: build a `_imports_subprocess(source)` helper and assert it returns True for crafted source strings (`"import subprocess"`, `"from subprocess import run"`, `"import subprocess as sp"`) and False for benign code — proves the AST walker actually detects what it claims.
+- [x] **Task 1 — `tests/test_no_subprocess_outside_cli_runner.py` (AC1)**
+  - [x] 1.1 Walk `hermes_icm_memory/` for every `*.py` file (use `pathlib.Path.rglob`).
+  - [x] 1.2 For each file, parse with `ast.parse(path.read_text(encoding="utf-8"))`.
+  - [x] 1.3 Walk the AST and collect any `ast.Import` whose alias name is `subprocess` OR any `ast.ImportFrom` whose module is `subprocess`.
+  - [x] 1.4 Assert the offending list is empty *unless* the file is `cli_runner.py`.
+  - [x] 1.5 Negative-control sub-test: helper `_imports_subprocess(source)` asserted True for crafted offending sources and False for benign code.
 
-- [ ] **Task 2 — `tests/test_no_hardcoded_dotcache.py` (AC2)**
-  - [ ] 2.1 Walk `hermes_icm_memory/` for every `*.py` file.
-  - [ ] 2.2 Read each file as text with `encoding="utf-8"`.
-  - [ ] 2.3 Assert `"~/.hermes"` not in the file content; collect violations and assert empty list with a helpful message naming the offending file(s).
-  - [ ] 2.4 Negative-control sub-test: assert the literal *would* be found if injected into a synthetic source string — proves the scanner isn't silently passing.
+- [x] **Task 2 — `tests/test_no_hardcoded_dotcache.py` (AC2)**
+  - [x] 2.1 Walk `hermes_icm_memory/` for every `*.py` file.
+  - [x] 2.2 Read each file as text with `encoding="utf-8"`.
+  - [x] 2.3 Assert `"~/.hermes"` not in file content; collect violations with helpful failure message.
+  - [x] 2.4 Negative-control sub-test: synthetic source string contains literal → caught; benign string passes.
 
-- [ ] **Task 3 — `tests/test_no_network_calls.py` (AC3 + AC4)**
-  - [ ] 3.1 Module-level helper `_register_and_capture()`: build a fake `ctx` whose `register_memory_provider(provider)` captures the provider, call `hermes_icm_memory.register(ctx)`, return the captured provider.
-  - [ ] 3.2 Module-level predicate `_HAS_LIFECYCLE`: provider has callable `is_available`, `get_config_schema`, AND `save_config`. Compute once at import-time. Tests 3-5 gate on this via `@pytest.mark.skipif(not _HAS_LIFECYCLE, reason="provider lifecycle methods land in S07; this skipif disappears once they exist")`.
-  - [ ] 3.3 `test_register_returns_provider` — sanity check (always runs): `_register_and_capture()` returns a non-None object with a `name` attribute.
-  - [ ] 3.4 `test_lifecycle_predicate_smoke` — always runs: asserts `_HAS_LIFECYCLE` is a `bool`, documenting the skip-gate behaviour.
-  - [ ] 3.5 `test_is_available_no_socket` — patches `socket.socket` with `monkeypatch.setattr` to a callable that raises `RuntimeError("network forbidden")`; calls `provider.is_available()`; asserts no exception leaks. Skipped when `_HAS_LIFECYCLE` is False.
-  - [ ] 3.6 `test_get_config_schema_no_socket` — same patch; calls `provider.get_config_schema()`; asserts no exception. Skipped when `_HAS_LIFECYCLE` is False.
-  - [ ] 3.7 `test_save_config_no_socket` — same patch; calls `provider.save_config({})` with an empty mapping; asserts no exception. Skipped when `_HAS_LIFECYCLE` is False.
+- [x] **Task 3 — `tests/test_no_network_calls.py` (AC3 + AC4)**
+  - [x] 3.1 `_CapturingCtx` + `_register_and_capture()` helper.
+  - [x] 3.2 Module-level `_HAS_LIFECYCLE` predicate computed once at import; skipif gate references it.
+  - [x] 3.3 `test_register_returns_provider` — always runs.
+  - [x] 3.4 `test_lifecycle_predicate_smoke` — always runs.
+  - [x] 3.5 `test_is_available_no_socket` — skipif until S07.
+  - [x] 3.6 `test_get_config_schema_no_socket` — skipif until S07.
+  - [x] 3.7 `test_save_config_no_socket` — skipif until S07.
 
-- [ ] **Task 4 — Quality gates**
-  - [ ] 4.1 `pytest --cov=hermes_icm_memory --cov-branch --cov-fail-under=85` → 0 failures; 5 tests collected, ≥ 2 active on this branch (the negative-control + smoke tests), 3 skipped via skipif with the documented reason.
-  - [ ] 4.2 `ruff check .` → 0 issues.
-  - [ ] 4.3 `mypy --strict hermes_icm_memory tests` → 0 errors.
-  - [ ] 4.4 `git status` clean; commit with `feat(S11)` prefix.
+- [x] **Task 4 — Quality gates**
+  - [x] 4.1 `pytest` → 10 passed, 3 skipped (S11: 4 active + 3 skipif). Coverage 100 %.
+  - [x] 4.2 `ruff check .` → 0 issues.
+  - [x] 4.3 `mypy --strict hermes_icm_memory tests` → 0 errors.
+  - [x] 4.4 Committed with `feat(S11)` prefix.
 
 ## File Spec (authoritative)
 
@@ -186,18 +186,32 @@ Claude Opus (BMAD dev-story phase, hermes-icm s11 teammate)
 
 ### Debug Log References
 
-(populated during implementation)
+- RED-confirm phase: temporarily injected `import subprocess` and `"~/.hermes/..."` into `hermes_icm_memory/__init__.py`. Both invariant tests failed loudly with file-naming offender messages. Reverted; both green.
+- Skipif-flip phase: temporarily added `is_available` / `get_config_schema` / `save_config` (each a no-op) to `_StubProvider`. The three skipif-gated tests lit up automatically with no test-file edit and all 5 socket tests passed. Reverted.
+- Final run: `pytest -v` → 10 passed, 3 skipped (S01: 4, S11 active: 6, S11 skipped: 3). Coverage 100 %, gate ≥85 % met.
+- `ruff check .` → All checks passed.
+- `mypy --strict hermes_icm_memory tests` → Success: no issues found in 8 source files.
 
 ### Completion Notes List
 
-(populated during implementation)
+- All 4 acceptance criteria satisfied (AC1 subprocess AST-walk, AC2 dot-cache literal text-scan, AC3 socket-patch lifecycle tests, AC4 forward-compat skipif gate).
+- Strict TDD: RED phase confirmed by temporarily violating each invariant; GREEN phase confirmed by reverting. Skipif-flip behaviour verified by temporarily adding lifecycle methods to the S01 stub.
+- Forward-compat design choice = Option A (skipif). Rationale: visible in pytest summary, self-documenting skip reason names S07, automatic light-up on S07 merge with no follow-up edit.
+- Negative-control tests included for both AST walker and text scanner — proves the scanners actually have teeth, not just vacuously-passing predicates.
+- `socket.socket` patched at the lowest common denominator: every higher-level Python network call ultimately constructs a socket, so this single patch catches all paths (urllib, http.client, requests, raw sockets).
+- AST-not-regex enforced for AC1 (per spec): handles `import subprocess as sp` cleanly; regex would require escalating complexity.
+- Text-scan-not-AST chosen for AC2: literal must be absent from comments/docstrings/string-literals alike, so simple `in` check on file content is correct and minimal.
 
 ### File List
 
-(populated during implementation)
+- `tests/test_no_subprocess_outside_cli_runner.py` (NEW) — AC1, AST walker + negative control.
+- `tests/test_no_hardcoded_dotcache.py` (NEW) — AC2, text scan + negative control.
+- `tests/test_no_network_calls.py` (NEW) — AC3, socket-patch lifecycle tests + AC4 skipif gate.
+- `_bmad-output/implementation-artifacts/5-1-architectural-invariant-tests.md` (NEW) — this story spec.
 
 ### Change Log
 
 | Date       | Change |
 |------------|--------|
 | 2026-05-06 | S11 story spec drafted (Phase 1 — bmad-create-story). Forward-compat design: skipif Option A. |
+| 2026-05-06 | S11 implementation (Phase 2 — bmad-dev-story): 3 new test files, 9 new tests (6 active + 3 skipif). RED-confirm via temporary invariant violation. Skipif-flip verified by temporarily adding lifecycle methods. 10 passed, 3 skipped, ruff + mypy --strict clean, coverage 100 %. |
