@@ -135,6 +135,11 @@ _INT_MIN: Final[dict[str, int]] = {
     "periodic_progress_every_n_turns": 1,
 }
 
+#: Module-level lookup table built once at import. Used by :func:`validate`.
+_SCHEMA_BY_KEY: Final[dict[str, dict[str, Any]]] = {
+    entry["key"]: entry for entry in _SCHEMA_ENTRIES
+}
+
 
 def get_default_schema() -> list[dict[str, Any]]:
     """Return a fresh copy of the ten architecture §10.1 schema entries.
@@ -220,13 +225,10 @@ def validate(values: Any) -> tuple[bool, dict[str, Any]]:
         if not isinstance(values, dict):
             return False, {"error": f"expected dict, got {type(values).__name__}"}
 
-        schema_by_key: dict[str, dict[str, Any]] = {
-            entry["key"]: entry for entry in _SCHEMA_ENTRIES
-        }
         normalized: dict[str, Any] = {}
 
         for key, raw in values.items():
-            entry = schema_by_key.get(key)
+            entry = _SCHEMA_BY_KEY.get(key)
             if entry is None:
                 # Unknown key: pass through (forward-compat).
                 normalized[key] = raw
