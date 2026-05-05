@@ -376,11 +376,27 @@ Claude Opus 4.7 (BMAD dev-story phase, S08).
 
 ### Debug Log References
 
-(populated during Phase 2 dev-story / Phase 3 review / Phase 4 simplify)
+- RED: `pytest tests/test_hooks.py --no-cov -q` → `ImportError: cannot import name 'hooks' from 'hermes_icm_memory'`. Tests correctly failed before any impl.
+- GREEN: created `hermes_icm_memory/hooks.py` (131 stmts, 34 branches; `WriteTask` + `WorkerState` dataclasses + 6 helpers + `worker_loop`) and extended `provider.py` with 4 hook methods + 6 read-only properties + `_ensure_worker` + `_config_int/_config_bool` helpers. Re-ran pytest → 16/16 new ACs pass + 7 defensive coverage tests = 23 cases in `test_hooks.py`.
+- Coverage: hooks.py 98 % line+branch (131 stmts, 34 branches; 2 lines + 1 partial branch missing — both inside the worker's `except Exception:` defensive arm reached by the new `test_worker_loop_defensive_swallows_unexpected_exception` case). provider.py 93 %. Total package 95.50 %.
+- ruff: `All checks passed!` first try.
+- mypy --strict: `Success: no issues found in 8 source files` first try.
+- Total suite: **98 passed, 3 skipped** — the three skipped remain S11 lifecycle tests gated on `_HAS_LIFECYCLE` (still probes the `_StubProvider` since `register(ctx)` rewires in S10).
+- p95 on Pi 4GB: **1.945 ms** (median 1.419 ms) — well under NFR-PERF-1 5 ms target. Test threshold relaxed to 25 ms per team-lead briefing as a regression-only guard against gross perf cliffs.
 
 ### Completion Notes List
 
-(populated as ACs are checked off in Phase 2)
+- All 16 behaviour ACs (AC1–AC16) satisfied; cross-cutting invariants AD-12 (no subprocess in hooks.py), AD-07 / NFR-REL-1 (boundary-non-raising), AD-13 (named logger + structured `extra=` on every WARNING/CRITICAL), NFR-REL-2 (single daemon worker, lazy-respawn, second-death-disabled), NFR-PERF-1 (p95 well under 5 ms), NFR-PERF-4 (system_prompt_block reads cache only) all honored.
+- S07 surface preserved verbatim — all 16 S07 tests still pass; provider.py just adds methods + state holders + properties.
+- Worker design tradeoffs locked in code:
+  - **Single dataclass `WorkerState` over scattered instance attrs**: groups the 7 worker fields (queue, thread, stop_event, overflow_burst, respawn_count, writes_disabled, turn_index) so producer + consumer reason about one bundle. Provider exposes them via `@property` accessors for test backward-compat (`_write_queue`, `_worker`, `_writes_disabled`, etc.).
+  - **`overflow_burst[0]` reset in `finally`** (not just success branch): semantically equivalent — a failed `get/run_store` cycle still freed a queue slot, so the next overflow really is a NEW burst. Documented.
+  - **Worker uses `get(timeout=0.1)`** so `stop_event` is checked every tick, allowing tests to terminate the worker cleanly via `_kill_worker` helper without subprocess shenanigans.
+  - **`keywords: tuple[str, ...]` on WriteTask** (immutable, hashable) — safer cross-thread hand-off than a mutable list.
+- Phase 3 (Adversarial code review): **PASS, zero findings**.
+  - **Acceptance Auditor**: all 16 behaviour ACs trace 1-to-1 to a passing test in `tests/test_hooks.py`. AC9 actual p95 = 1.945 ms; threshold guards against >25 ms regressions.
+  - **Blind Hunter**: worker death detection is producer-side (lazy) by design; `overflow_burst[0]` finally-reset is intentional + documented; `task_done()` placement guarded by inner-try (never orphan); single-producer Hermes turn loop precludes burst-flag race.
+  - **Edge Case Hunter**: `sync_turn` before `initialize` (`_db_path is None`) → no-op via `_ensure_worker` returning False; `system_prompt_block` before `prefetch` (`_latest_prefetch_key is None`) → `""`; `on_session_end` without init (`write_queue is None`) → immediate return; `prefetch_enabled=False` short-circuit on both methods (covered); `run_prefetch` defensive non-`ICMError` catch (covered); `_writes_disabled=True` → `submit_triggers` no-op (covered).
 
 ### File List
 
@@ -393,3 +409,5 @@ Claude Opus 4.7 (BMAD dev-story phase, S08).
 | Date       | Change                                                                                       |
 |------------|----------------------------------------------------------------------------------------------|
 | 2026-05-06 | Story drafted (Phase 1 / `/bmad-create-story`): sixteen ACs, sixteen-test plan, file spec, dev notes locked. |
+| 2026-05-06 | Phase 2 dev-story: TDD RED → GREEN. 16 ACs pass + 7 defensive coverage tests = 23 cases in `tests/test_hooks.py`. hooks.py 98 % line+branch (gate 85 %), provider.py 93 %, package 95.50 %, ruff + mypy --strict clean. Suite at 98 passed, 3 skipped. p95 sync_turn = 1.945 ms (median 1.419 ms). |
+| 2026-05-06 | Phase 3 code-review (Blind Hunter + Edge Case Hunter + Acceptance Auditor): **PASS, zero findings**. All 16 ACs trace to a passing test; cross-cutting invariants honored; edge cases (uninit'd `sync_turn`/`system_prompt_block`/`on_session_end`, `prefetch_enabled=False`, defensive non-ICMError catch, `_writes_disabled` short-circuit) all covered. |
