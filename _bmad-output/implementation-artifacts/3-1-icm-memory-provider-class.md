@@ -1,6 +1,6 @@
 # Story 3.1: IcmMemoryProvider class
 
-Status: in-review
+Status: done
 Story ID: S07 · Epic: 3 (Memory provider lifecycle) · Effort: L · Dependencies: S04 (cli_runner, errors), S05 (config), S01 (register stub being upgraded later by S10)
 
 ## Story
@@ -321,3 +321,4 @@ Claude Opus 4.7 (BMAD dev-story phase, S07).
 | 2026-05-06 | Story drafted (Phase 1 / `/bmad-create-story`): sixteen ACs, fourteen-test plan, file spec, dev notes locked. |
 | 2026-05-06 | Phase 2 dev-story: TDD RED → GREEN. 14 cases pass + 2 extra coverage cases (no-hermes_home + sidecar-write OSError) → 16 cases total in `test_provider.py`. provider.py 100 % line+branch (gate 85 %), package 96.43 %, ruff + mypy --strict clean. Suite at 75 passed, 3 skipped (S11 lifecycle skips will light up in S10, not S07). |
 | 2026-05-06 | Phase 3 code-review (Blind Hunter + Edge Case Hunter + Acceptance Auditor): **PASS, zero findings**. All 14 behaviour ACs trace to a passing test; cache-flip ordering safe; logging discipline correct; `_TOOL_UNAVAILABLE_JSON` is a `Final[str]` computed once at import. Edge cases (`save_config({})`, `save_config` + OSError on write, `handle_tool_call("")`, `initialize` with `profile=""`) all covered or explicitly documented as out-of-scope. |
+| 2026-05-06 | Phase 4 simplify pass: applied three findings — (a) dropped `_initialized: bool` flag (derivable from `_init_args is not None`; idempotency guard now keys directly on `_init_args == args_key`); (b) trimmed module docstring from 38 lines to 11 (kept the AD-12 / AD-13 / AD-07 invariants; removed the AD-05/06/18 + S08/S09/S10 roadmap recap that duplicated per-method docs and the story file); (c) deleted the `# (AC8) (AC10) (AC11) S07 stub` story-tracking comments from production code (story file owns traceability) plus the `# `result` is already shaped …` narrate-what comment. Replaced `_ = (name, args)` line in `handle_tool_call` with method-level `# noqa: ARG002`. provider.py shrank 67 → 63 stmts; coverage stays 100 % line+branch; suite still 75 passed / 3 skipped; ruff + mypy --strict clean. Skipped two reviewer suggestions: stringly-typed sidecar error → constant (single-use, not worth a `Final`), and `_init_args` → NamedTuple (3 fields, comment is sufficient). Reuse-review optional finding (extract `_write_config_sidecar` to `config.py`) deferred to S08 if the helper actually gets a second caller. |
