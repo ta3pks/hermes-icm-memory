@@ -1,6 +1,6 @@
 # Story 1.1: Package skeleton and entry point
 
-Status: ready-for-dev
+Status: review
 Story ID: S01 · Epic: 1 (Plugin foundation) · Effort: M · Dependencies: none
 
 ## Story
@@ -49,28 +49,28 @@ so that every subsequent story (S02–S14) has a CI-validated foundation to buil
 
 > **TDD discipline (mandatory):** every code task is preceded by writing the failing test for it. Run `pytest tests/test_plugin_loader.py -q` after writing tests but before writing impl, and confirm all four FAIL. Only then write the impl.
 
-- [ ] **Task 1 — Write failing tests first (AC1, AC2, AC4)**
-  - [ ] 1.1 Create `tests/__init__.py` (empty file).
-  - [ ] 1.2 Create `tests/conftest.py` (empty placeholder; later stories will add fixtures — keep file present so pytest collection is stable).
-  - [ ] 1.3 Create `tests/test_plugin_loader.py` containing the four tests from §Test Plan (verbatim names). Use `unittest.mock.MagicMock` for the fake `ctx`. Use `tomllib` (stdlib, 3.11+) to parse `pyproject.toml`. Use `pathlib.Path(__file__).resolve().parent.parent` to locate the repo root from the test file. For YAML, parse via `yaml.safe_load(...)` — add `pyyaml` to `[project.optional-dependencies].dev`.
-  - [ ] 1.4 Confirm `pytest tests/test_plugin_loader.py -q` reports 4 collected, 4 failed (impl missing).
+- [x] **Task 1 — Write failing tests first (AC1, AC2, AC4)**
+  - [x] 1.1 Create `tests/__init__.py` (empty file).
+  - [x] 1.2 Create `tests/conftest.py` (empty placeholder; later stories will add fixtures — keep file present so pytest collection is stable).
+  - [x] 1.3 Create `tests/test_plugin_loader.py` containing the four tests from §Test Plan (verbatim names). Use `unittest.mock.MagicMock` for the fake `ctx`. Use `tomllib` (stdlib, 3.11+) to parse `pyproject.toml`. Use `pathlib.Path(__file__).resolve().parent.parent` to locate the repo root from the test file. For YAML, parse via `yaml.safe_load(...)` — add `pyyaml` to `[project.optional-dependencies].dev`.
+  - [x] 1.4 Confirm `pytest tests/test_plugin_loader.py -q` reports 4 collected, 4 failed (impl missing).
 
-- [ ] **Task 2 — Minimal `pyproject.toml` enabling install (AC3)**
-  - [ ] 2.1 Create `pyproject.toml` per §File Spec → `pyproject.toml`.
-  - [ ] 2.2 In a fresh venv: `python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"`. If `pip` missing, fall back to `python3 -m pip install -e ".[dev]"`.
-  - [ ] 2.3 Verify `python -c "import hermes_icm_memory"` raises `ModuleNotFoundError` (the package dir doesn't exist yet — this is correct).
+- [x] **Task 2 — Minimal `pyproject.toml` enabling install (AC3)**
+  - [x] 2.1 Create `pyproject.toml` per §File Spec → `pyproject.toml`.
+  - [x] 2.2 In a fresh venv: `python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"`. If `pip` missing, fall back to `python3 -m pip install -e ".[dev]"`.
+  - [x] 2.3 Verify `python -c "import hermes_icm_memory"` raises `ModuleNotFoundError` (the package dir doesn't exist yet — this is correct).
 
-- [ ] **Task 3 — Implementation files (AC1, AC2, AC4)**
-  - [ ] 3.1 Create `hermes_icm_memory/_version.py` with `__version__ = "0.1.0"`.
-  - [ ] 3.2 Create `hermes_icm_memory/__init__.py` with the stub `register(ctx)` per §File Spec.
-  - [ ] 3.3 Create `plugin.yaml` per §File Spec.
-  - [ ] 3.4 Re-run `pytest tests/test_plugin_loader.py -q`. All four pass.
+- [x] **Task 3 — Implementation files (AC1, AC2, AC4)**
+  - [x] 3.1 Create `hermes_icm_memory/_version.py` with `__version__ = "0.1.0"`.
+  - [x] 3.2 Create `hermes_icm_memory/__init__.py` with the stub `register(ctx)` per §File Spec.
+  - [x] 3.3 Create `plugin.yaml` per §File Spec.
+  - [x] 3.4 Re-run `pytest tests/test_plugin_loader.py -q`. All four pass.
 
-- [ ] **Task 4 — Quality gates (all four ACs)**
-  - [ ] 4.1 `ruff check .` → 0 issues.
-  - [ ] 4.2 `mypy --strict hermes_icm_memory tests` → 0 errors.
-  - [ ] 4.3 `pytest --cov=hermes_icm_memory --cov-branch --cov-fail-under=85` → passes (coverage will be 100 % at this story's scope; the gate only enforces the floor).
-  - [ ] 4.4 `git status` clean → commit.
+- [x] **Task 4 — Quality gates (all four ACs)**
+  - [x] 4.1 `ruff check .` → 0 issues.
+  - [x] 4.2 `mypy --strict hermes_icm_memory tests` → 0 errors.
+  - [x] 4.3 `pytest --cov=hermes_icm_memory --cov-branch --cov-fail-under=85` → passes (coverage will be 100 % at this story's scope; the gate only enforces the floor).
+  - [x] 4.4 `git status` clean → commit.
 
 ## File Spec (authoritative — copy-paste boilerplate)
 
@@ -385,20 +385,32 @@ Claude Opus (BMAD dev-story phase)
 
 ### Debug Log References
 
-(Populated during dev-story execution.)
+- RED phase: ran `pytest tests/test_plugin_loader.py --no-cov -q` after writing tests but before any impl files existed → collection error `ImportError: cannot import name '_version' from 'hermes_icm_memory' (unknown location)`. Tests correctly failed.
+- GREEN phase: created `_version.py`, `__init__.py`, `plugin.yaml`, re-ran `pip install -e ".[dev]"` to register the new package dir, re-ran pytest → all 4 tests pass.
+- Coverage report: `hermes_icm_memory/__init__.py` 9 stmts 100% / `_version.py` 1 stmt 100% / total 100% (well above 85% gate).
+- ruff: `All checks passed!`
+- mypy --strict: `Success: no issues found in 5 source files`.
 
 ### Completion Notes List
 
-(Populated during dev-story execution.)
+- All 4 acceptance criteria satisfied (AC1 install + baseline tests pass, AC2 version single-source consistency, AC3 pyproject.toml shape, AC4 plugin.yaml shape).
+- Followed strict TDD: wrote 4 tests first, confirmed RED, then minimal impl to GREEN. No refactor needed (impl is minimal stub).
+- Stuck to spec exactly — `_StubProvider` (S10 swap target) carries only `name = "icm"`. No premature provider logic, no subprocess, no logging — those belong to S04/S07/S08.
+- Used `Any` for `ctx` parameter type (Hermes does not publish a typed `Context` protocol on PyPI). Documented in code comment.
+- Field-name choice: used `hooks` in `plugin.yaml` (per AC4), not `provides_hooks` from the reference scaffold. Rationale documented inline in Dev Notes.
 
 ### File List
 
-Expected after this story (will be confirmed during dev-story):
+- `pyproject.toml` (NEW) — PEP 621 metadata, entry-point `hermes_agent.plugins`, dev deps, pytest/ruff/mypy/coverage config.
+- `plugin.yaml` (NEW) — Hermes manifest with name, version, description, four hooks.
+- `hermes_icm_memory/__init__.py` (NEW) — `register(ctx)` stub + `_StubProvider`.
+- `hermes_icm_memory/_version.py` (NEW) — `__version__ = "0.1.0"`.
+- `tests/__init__.py` (NEW) — empty pkg marker.
+- `tests/conftest.py` (NEW) — empty placeholder for shared fixtures.
+- `tests/test_plugin_loader.py` (NEW) — four baseline tests.
 
-- `pyproject.toml` (NEW)
-- `plugin.yaml` (NEW)
-- `hermes_icm_memory/__init__.py` (NEW)
-- `hermes_icm_memory/_version.py` (NEW)
-- `tests/__init__.py` (NEW)
-- `tests/conftest.py` (NEW)
-- `tests/test_plugin_loader.py` (NEW)
+### Change Log
+
+| Date       | Change                                                                                                  |
+|------------|---------------------------------------------------------------------------------------------------------|
+| 2026-05-06 | S01 implementation: package skeleton + register stub. 4 tests, 100 % coverage, ruff + mypy --strict clean. |
