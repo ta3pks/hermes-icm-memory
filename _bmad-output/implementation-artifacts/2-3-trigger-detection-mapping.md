@@ -1,6 +1,6 @@
 # Story 2.3: Trigger detection mapping
 
-Status: in-progress
+Status: review
 Story ID: S06 · Epic: 2 (ICM adapter core) · Effort: S · Dependencies: S01
 
 ## Story
@@ -80,26 +80,22 @@ so that decisions, errors-resolved, preferences, context, and periodic progress 
 
 > **TDD discipline (mandatory):** every code task is preceded by writing the failing test for it. Run `pytest tests/test_mapping.py -q --no-cov` after writing the tests but before any impl exists, confirm RED, then implement to GREEN.
 
-- [ ] **Task 1 — Write failing tests first (AC1–AC9)**
-  - [ ] 1.1 Create `tests/test_mapping.py` containing the nine tests from §Test Plan (verbatim names).
-  - [ ] 1.2 Confirm `pytest tests/test_mapping.py --no-cov -q` reports nine collected, nine failed/errored (impl missing).
+- [x] **Task 1 — Write failing tests first (AC1–AC9)**
+  - [x] 1.1 Create `tests/test_mapping.py` containing the nine tests from §Test Plan (verbatim names).
+  - [x] 1.2 Confirm `pytest tests/test_mapping.py --no-cov -q` reports nine collected, all errored on `ImportError: cannot import name 'mapping'` (impl missing) — RED phase recorded.
 
-- [ ] **Task 2 — `mapping.py` implementation (AC1, AC2–AC9)**
-  - [ ] 2.1 Create `hermes_icm_memory/mapping.py`.
-  - [ ] 2.2 Define a `Trigger = tuple[str, str, str, list[str]]` type alias (topic, importance, content, keywords) for clarity. Or document the tuple shape in the docstring of `detect_triggers`.
-  - [ ] 2.3 Define `MAPPING: dict[str, dict[str, str]]` literal with the five categories per AC1.
-  - [ ] 2.4 Define `detect_triggers(user_text, assistant_text, project=None, turn_index=0, every_n_turns=20) -> list[Trigger]` per ACs.
-    - Use compiled `re.Pattern` objects, case-insensitive, with `\b` word boundaries — keeps the heuristics readable and unit-testable.
-    - Each category has its own pattern; iteration order is stable (use a list-of-tuples or rely on `dict` insertion order).
-    - Periodic-context handling sits at the top of the function so the sequence of emitted tuples is deterministic across tests.
-    - All public surface is type-hinted; pass `mypy --strict`.
-  - [ ] 2.5 Re-run `pytest tests/test_mapping.py --no-cov -q`. All nine pass.
+- [x] **Task 2 — `mapping.py` implementation (AC1, AC2–AC9)**
+  - [x] 2.1 Create `hermes_icm_memory/mapping.py`.
+  - [x] 2.2 Defined `Trigger = tuple[str, str, str, list[str]]` type alias.
+  - [x] 2.3 Defined `MAPPING: Final[dict[str, dict[str, str]]]` literal with the five categories per AC1.
+  - [x] 2.4 Defined `detect_triggers(...)` per ACs with compiled, case-insensitive, word-bounded regex patterns. Periodic-context handling sits at the top of the function; deterministic order: periodic → errors → decisions → learnings → preferences.
+  - [x] 2.5 Re-run `pytest tests/test_mapping.py --no-cov -q`. All nine pass.
 
-- [ ] **Task 3 — Quality gates**
-  - [ ] 3.1 `ruff check .` → 0 issues.
-  - [ ] 3.2 `mypy --strict hermes_icm_memory tests` → 0 errors.
-  - [ ] 3.3 `pytest --cov=hermes_icm_memory --cov-branch --cov-fail-under=85` → passes; coverage on `mapping.py` ≥ 85 % (line + branch).
-  - [ ] 3.4 `git status` clean → commit.
+- [x] **Task 3 — Quality gates**
+  - [x] 3.1 `ruff check .` → All checks passed!
+  - [x] 3.2 `mypy --strict hermes_icm_memory tests` → 0 errors (7 source files).
+  - [x] 3.3 `pytest --cov=hermes_icm_memory --cov-branch --cov-fail-under=85` → passes; `mapping.py` 95 % line + branch (44 stmts, 1 miss; 16 branch, 2 partial — the 5-keyword-cap break and the seen-token continue both unhit by current fixtures, deemed safe).
+  - [x] 3.4 `git status` clean → committed.
 
 ## File Spec
 
@@ -269,22 +265,35 @@ Suggested literals:
 
 ### Agent Model Used
 
-_filled by dev phase_
+Claude Opus 4.7 (BMAD dev-story phase, S06).
 
 ### Debug Log References
 
-_filled by dev phase_
+- RED phase: ran `pytest tests/test_mapping.py --no-cov -q` after writing nine tests but before any impl → `ImportError: cannot import name 'mapping' from 'hermes_icm_memory'`. Tests correctly failed.
+- GREEN phase: created `hermes_icm_memory/mapping.py` with `MAPPING` dict + `detect_triggers` + small private helpers (`_resolve_topic`, `_extract_keywords`, `_truncate`). Re-ran pytest → 9/9 pass.
+- Coverage: `hermes_icm_memory/mapping.py` 44 stmts, 1 miss; 16 branches, 2 partial → 95 % line+branch (gate 85 %). Total package coverage 96 %.
+- ruff: `All checks passed!` (one E501 fixed during dev — extracted nested f-string into a temporary).
+- mypy --strict: `Success: no issues found in 7 source files`.
 
 ### Completion Notes List
 
-_filled by dev phase_
+- All nine ACs satisfied. AC9 (learnings) covered both inside `test_detect_multiple_triggers_in_one_turn` (assertion that `"learnings"` appears in the topic set when "Turns out" phrase is present) — keeps the suite at the spec-locked nine tests.
+- Followed strict TDD: nine tests RED → impl → all GREEN, no refactor needed.
+- Pure module — no `subprocess`, no `logging`, no class. AD-12 / AD-13 / AD-17 honored.
+- Topic-template substitution: `project=None` → `"default"` (AC8). The literal `"{project}"` never appears in any emitted tuple.
+- Periodic context AC5 boundary: `turn_index == 0` does NOT fire (explicit `> 0` guard). Tested.
+- Preferences trigger searches `user_text` only (story-spec rationale: don't re-fire when assistant restates a preference).
+- Emission order locked: periodic → errors-resolved → decisions → learnings → preferences. Tests use set-membership / list-equality where order matters.
 
 ### File List
 
-_filled by dev phase_
+- `hermes_icm_memory/mapping.py` (NEW) — `MAPPING` dict + `detect_triggers` + private helpers.
+- `tests/test_mapping.py` (NEW) — nine TDD tests covering AC1–AC9.
 
 ### Change Log
 
 | Date       | Change                                                                                                          |
 |------------|-----------------------------------------------------------------------------------------------------------------|
 | 2026-05-06 | Story drafted (Phase 1 / `/bmad-create-story`): ACs, test plan, file spec, dev notes locked.                    |
+| 2026-05-06 | Phase 2 dev-story: TDD RED → GREEN. 9 tests pass, mapping.py 95 % line+branch, ruff + mypy --strict clean.       |
+| 2026-05-06 | Phase 3 code-review (Blind Hunter + Edge Case Hunter + Acceptance Auditor): Acceptance Auditor PASS, no AC violations. Blind Hunter clean (str.format ignoring extra kwargs is safe; apostrophes work with `\b`). Edge Case Hunter clean (empty strings → []; `every_n_turns == 0` guarded; `turn_index <= 0` filtered; unicode-aware `\b`). One LOW finding flagged for simplify: `_truncate` is a one-line helper that inlines to `text[:_CONTENT_LIMIT]` cleanly (slicing is a no-op when shorter than the cap). Status: review → Phase 4. |
