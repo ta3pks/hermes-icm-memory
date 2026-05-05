@@ -1,6 +1,6 @@
 # Story 2.2: Config schema + path resolution
 
-Status: drafting
+Status: review
 Story ID: S05 · Epic: 2 (ICM adapter core) · Effort: M · Dependencies: S01
 
 ## Story
@@ -89,24 +89,24 @@ so that I can fit the plugin to my workflow and run multiple Hermes profiles wit
 
 > **TDD discipline (mandatory):** every code task is preceded by writing the failing test for it. Run `pytest tests/test_config.py -q --no-cov` after writing tests but before any implementation, confirm RED, then implement to GREEN.
 
-- [ ] **Task 1 — Write failing tests first (AC1–AC10)**
-  - [ ] 1.1 Create `tests/test_config.py` with the ten tests from §Test Plan (verbatim names).
-  - [ ] 1.2 Confirm `pytest tests/test_config.py --no-cov -q` reports `ImportError` (no `config` module yet) — RED phase.
+- [x] **Task 1 — Write failing tests first (AC1–AC10)**
+  - [x] 1.1 Created `tests/test_config.py` with the ten named tests from §Test Plan plus five focused coverage tests (bool-as-int, unparseable int, non-string string-key, arbitrary string for bool key, non-{str,bool} for bool key, unknown-key passthrough).
+  - [x] 1.2 RED phase confirmed — `pytest tests/test_config.py --no-cov -q` reported `ImportError: cannot import name 'config' from 'hermes_icm_memory'`.
 
-- [ ] **Task 2 — `config.py` implementation (AC1–AC10)**
-  - [ ] 2.1 Create `hermes_icm_memory/config.py`.
-  - [ ] 2.2 Define `_SCHEMA_ENTRIES: Final[list[dict[str, Any]]]` literal mirroring architecture §10.1 verbatim.
-  - [ ] 2.3 Implement `get_default_schema() -> list[dict[str, Any]]` returning a **defensive copy** so callers cannot mutate module state.
-  - [ ] 2.4 Implement `validate(values: Any) -> tuple[bool, dict[str, Any]]` — flat-dict check, per-key type coercion, range / enum checks, never raises.
-  - [ ] 2.5 Implement `resolve_db_path(hermes_home: str | os.PathLike[str], profile: str | None = None) -> Path` with `expanduser().resolve()`.
-  - [ ] 2.6 Implement `mkdir_parent(db_path: Path) -> None` — `parents=True, exist_ok=True`.
-  - [ ] 2.7 Re-run `pytest tests/test_config.py --no-cov -q`. All ten pass.
+- [x] **Task 2 — `config.py` implementation (AC1–AC10)**
+  - [x] 2.1 Created `hermes_icm_memory/config.py`.
+  - [x] 2.2 Defined `_SCHEMA_ENTRIES: Final[list[dict[str, Any]]]` literal mirroring architecture §10.1 verbatim (10 entries, all `secret=False`, all `required=False`, `choices` only on the enum entry).
+  - [x] 2.3 `get_default_schema()` returns `copy.deepcopy(_SCHEMA_ENTRIES)` — verified by mutation test in `test_default_schema_has_ten_keys`.
+  - [x] 2.4 `validate(values)` — flat-dict check, per-key coercion via `_coerce_int` / `_coerce_bool` (bool explicitly refused for int keys), range gate via `_INT_MIN`, enum membership check, unknown-key passthrough, defensive `try/except Exception` outermost layer.
+  - [x] 2.5 `resolve_db_path(...)` accepts `str` or `os.PathLike`, expands `~`, calls `.resolve()`, returns `<hermes_home>/icm/<profile>.db`. Empty profile string also falls back to `"default"` (defensive).
+  - [x] 2.6 `mkdir_parent(db_path)` — `db_path.parent.mkdir(parents=True, exist_ok=True)`.
+  - [x] 2.7 GREEN phase: 15 of 15 collected cases pass (10 named tests; the garbage-input test is parametrized over 6 cases). Full suite 34 passed, 3 skipped (integration).
 
-- [ ] **Task 3 — Quality gates**
-  - [ ] 3.1 `ruff check .` → 0 issues.
-  - [ ] 3.2 `mypy --strict hermes_icm_memory tests` → 0 errors.
-  - [ ] 3.3 `pytest --cov=hermes_icm_memory --cov-branch --cov-fail-under=85` → passes; `config.py` ≥ 85 % line + branch (target 100 %).
-  - [ ] 3.4 Commit on branch `s05` with prefix `docs(S05)/feat(S05)/...`.
+- [x] **Task 3 — Quality gates**
+  - [x] 3.1 `ruff check .` → All checks passed!
+  - [x] 3.2 `mypy --strict hermes_icm_memory tests` → Success: no issues found in 12 source files.
+  - [x] 3.3 `pytest --cov=hermes_icm_memory --cov-branch --cov-fail-under=85` → passes; `config.py` **100 %** (79 stmts, 0 miss, 38 branches, 0 partial). Total package coverage 98.38 %.
+  - [x] 3.4 Story spec + impl committed on branch `s05`.
 
 ## File Spec
 
@@ -302,11 +302,23 @@ Claude Opus 4.7 (BMAD dev-story phase, S05).
 
 ### Debug Log References
 
-(Filled during Phase 2.)
+- RED phase: `pytest tests/test_config.py --no-cov -q` → `ImportError: cannot import name 'config' from 'hermes_icm_memory'`. Tests correctly failed before any impl.
+- GREEN phase: created `hermes_icm_memory/config.py` (`_SCHEMA_ENTRIES` + four public functions + `_coerce_int`/`_coerce_bool`/`_validate_one` helpers + `_INT_MIN` table). Re-ran pytest → 15/15 cases pass.
+- Coverage: `config.py` **100 %** line+branch (79 stmts, 38 branches). Total package 98.38 %.
+- ruff: `All checks passed!` after one auto-fix (import sort order in tests/test_config.py).
+- mypy --strict: `Success: no issues found in 12 source files`.
 
 ### Completion Notes List
 
-(Filled during Phase 2.)
+- All ten ACs satisfied. Coverage well above the 85 % gate (config.py = 100 %).
+- Strict TDD followed: 15-case RED → impl → GREEN, no refactor needed.
+- Pure module — no `subprocess`, no `logging`, no class. AD-12 / AD-13 / AD-17-style discipline honored. S11 invariant tests still green.
+- Defensive copy via `copy.deepcopy` covers the nested `choices` list inside the enum entry — caller mutation is contained.
+- `_coerce_int` explicitly rejects `bool` (Python quirk: `True` is `1`); test `test_validate_rejects_bool_for_int_key` locks this in.
+- Unknown keys pass through to `normalized_values` (forward-compat) — `test_validate_passes_through_unknown_keys` locks this in.
+- `resolve_db_path` accepts both `str` and `os.PathLike` via `os.fspath()`. `~` expansion verified via `monkeypatch.setenv("HOME", ...)`.
+- `mkdir_parent` is the only filesystem-mutating call in the module; idempotent via `parents=True, exist_ok=True`.
+- One `# pragma: no cover` on the `unknown schema type` defensive return path — unreachable from any current schema entry, no test data can construct it.
 
 ### File List
 
@@ -318,3 +330,4 @@ Claude Opus 4.7 (BMAD dev-story phase, S05).
 | Date       | Change                                                                                                          |
 |------------|-----------------------------------------------------------------------------------------------------------------|
 | 2026-05-06 | Story drafted (Phase 1 / `/bmad-create-story`): ACs, test plan, file spec, dev notes locked.                    |
+| 2026-05-06 | Phase 2 dev-story: TDD RED → GREEN. 15 cases pass, config.py 100 % line+branch, ruff + mypy --strict clean.       |
