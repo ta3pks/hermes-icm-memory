@@ -38,7 +38,7 @@ def test_registered_provider_name_is_icm() -> None:
 
 def test_version_is_consistent() -> None:
     """__version__ must match _version.__version__ and pyproject.toml's version."""
-    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     pyproject_version = pyproject["project"]["version"]
     assert hermes_icm_memory.__version__ == _version.__version__
     assert hermes_icm_memory.__version__ == pyproject_version
@@ -46,7 +46,7 @@ def test_version_is_consistent() -> None:
 
 def test_plugin_yaml_shape() -> None:
     """plugin.yaml declares name/version/description/hooks with the four expected hooks."""
-    manifest = yaml.safe_load((REPO_ROOT / "plugin.yaml").read_text())
+    manifest = yaml.safe_load((REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
     for key in ("name", "version", "description", "hooks"):
         assert key in manifest, f"plugin.yaml missing required key: {key}"
     assert manifest["name"] == "hermes-icm-memory"
