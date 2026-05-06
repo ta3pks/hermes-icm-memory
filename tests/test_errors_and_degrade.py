@@ -140,19 +140,11 @@ def test_mode1_icm_not_on_path_degrades_silently(
         * No exception escapes any entry-point.
     """
     monkeypatch.setattr(shutil, "which", lambda _name: None)
-    # Counter-wrapped stub proves prefetch's is_available() guard short-circuits
-    # before reaching the subprocess boundary (guards against an Edge#10
-    # regression where prefetch starts bypassing is_available).
-    subprocess_calls = {"n": 0}
-
-    def _counting_not_found(*a: Any, **kw: Any) -> NoReturn:
-        subprocess_calls["n"] += 1
-        _stub_run_not_found(*a, **kw)
-        raise AssertionError("unreachable")  # for mypy NoReturn — _stub_ raised
-
-    monkeypatch.setattr(
-        "hermes_icm_memory.cli_runner.subprocess.run", _counting_not_found
-    )
+    # ``side_effect`` makes the spy raise per ``_stub_run_not_found`` while
+    # ``call_count`` records each subprocess attempt — proves prefetch's
+    # ``is_available()`` guard short-circuits before the subprocess hop.
+    spy = MagicMock(side_effect=_stub_run_not_found)
+    monkeypatch.setattr("hermes_icm_memory.cli_runner.subprocess.run", spy)
 
     provider = IcmMemoryProvider()
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
@@ -161,32 +153,30 @@ def test_mode1_icm_not_on_path_degrades_silently(
 
     with caplog.at_level(logging.WARNING):
         recall_out = provider.handle_tool_call("icm_recall", {"query": "anything"})
-        calls_after_recall = subprocess_calls["n"]
         topics_out = provider.handle_tool_call("icm_topics", {})
         health_out = provider.handle_tool_call("icm_health", {})
-        calls_after_reads = subprocess_calls["n"]
+        calls_after_reads = spy.call_count
         prefetch_out = provider.prefetch(query="anything")
-        calls_after_prefetch = subprocess_calls["n"]
+        calls_after_prefetch = spy.call_count
 
     assert json.loads(recall_out) == {"hits": []}
     assert json.loads(topics_out) == {"topics": []}
     assert json.loads(health_out) == {"report": {}}
-    # Each read tool actually attempts the subprocess (and is caught at
-    # cli_runner) — proves the read paths really do fail through the typed
-    # exception channel rather than short-circuiting elsewhere.
+    # Each read tool actually attempts the subprocess and the failure surfaces
+    # through the typed-exception channel — proves the degrade path is real,
+    # not a short-circuit elsewhere.
     assert calls_after_reads >= 3, (
         f"expected ≥3 subprocess attempts across recall/topics/health; "
         f"got {calls_after_reads}"
     )
     # ``prefetch`` short-circuits on ``not is_available()`` and returns "" without
-    # invoking ``cli_runner`` — guards Edge#10 (regression where prefetch
-    # bypasses the cheaper guard).
+    # invoking ``cli_runner`` — guards a regression where prefetch bypasses
+    # the cheaper guard.
     assert prefetch_out == ""
     assert calls_after_prefetch == calls_after_reads, (
         f"prefetch must NOT invoke subprocess when is_available()=False; "
         f"got {calls_after_prefetch - calls_after_reads} extra call(s)"
     )
-    assert calls_after_recall >= 1  # used by mypy to keep variable live
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings, "expected at least one WARNING from the failed read paths"
@@ -211,13 +201,19 @@ _READ_TOOLS: list[tuple[str, dict[str, Any]]] = [
     ("icm_topics", {"topics": []}),
     ("icm_health", {"report": {}}),
 ]
-_MODES_2_3 = [
+_MODES_2_3: list[tuple[str, Any]] = [
     ("mode2_nonzero", _stub_run_nonzero),
     ("mode3_timeout", _stub_run_timeout),
 ]
+# Mode 4 excludes ``icm_topics`` per the catalogue comment above. Derive
+# from ``_READ_TOOLS`` so a future fourth read-tool entry is opt-out, not
+# opt-in.
 _MODE_4_TOOLS: list[tuple[str, dict[str, Any]]] = [
-    ("icm_recall", {"hits": []}),
-    ("icm_health", {"report": {}}),
+    t for t in _READ_TOOLS if t[0] != "icm_topics"
+]
+# Stress-test catalogue (modes 2, 3, 4 — all subprocess-failure modes).
+_ALL_SUBPROC_FAILURE_MODES: list[tuple[str, Any]] = _MODES_2_3 + [
+    ("mode4_malformed", _stub_run_malformed),
 ]
 
 
@@ -328,9 +324,8 @@ def test_mode3_timeout_in_prefetch_caches_empty(
 
     Per architecture §8 failure variant: prefetch must (a) return ``""``,
     (b) write ``[]`` into the cache so ``system_prompt_block`` does not retry,
-    (c) log WARNING. Closes Edge#8 — modes 2/3/4 were previously only tested
-    on the LLM-tool path; this proves the same degrade contract on the hook
-    path too.
+    (c) log WARNING. Proves the degrade contract on the hook path (modes
+    2/3/4 are otherwise only exercised on the LLM-tool path above).
     """
     monkeypatch.setattr("hermes_icm_memory.cli_runner.subprocess.run", _stub_run_timeout)
 
@@ -370,7 +365,10 @@ def test_mode5_first_call_slow_path_no_degrade(
     """
 
     def _slow_then_succeed(*_a: Any, **_kw: Any) -> Any:
-        time.sleep(0.05)  # 50ms — short enough for fast tests, long enough to register
+        # 2 ms is enough for ``time.perf_counter`` to register a non-zero
+        # delta on every supported platform (Linux/macOS/Windows clock
+        # granularity is sub-millisecond) while keeping the test fast.
+        time.sleep(0.002)
         return MagicMock(
             returncode=0,
             stdout='[{"id": "m1", "topic": "preferences", "summary": "use bun"}]',
@@ -407,8 +405,8 @@ def test_mode5_first_call_slow_path_no_degrade(
         if getattr(r, "elapsed_ms", None) is not None
     ]
     assert elapsed_records, "expected at least one DEBUG record carrying elapsed_ms extra"
-    # Tightened (Blind#4) — elapsed_ms must be a positive number, not just present.
-    # Catches a regression where the field is wired but always 0/None.
+    # ``elapsed_ms`` must be a positive number, not just present — catches a
+    # regression where the field is wired but always 0/None.
     assert any(
         isinstance(v, (int, float)) and v > 0 for v in elapsed_records
     ), f"expected elapsed_ms > 0 on the slow-call DEBUG record; got {elapsed_records!r}"
@@ -468,18 +466,23 @@ def test_mode7_worker_dies_twice_degrades_with_critical(
     _kill_worker(initialized_provider)
     initialized_provider.sync_turn(user_content="u", assistant_content="a")
     assert initialized_provider._respawn_count == 1
-    assert initialized_provider._worker is not None
-    assert initialized_provider._worker.is_alive()
+    second_worker = initialized_provider._worker
+    assert second_worker is not None
+    assert second_worker.is_alive()
 
     # Second death — degrade-to-drop forever.
     _kill_worker(initialized_provider)
+    assert not second_worker.is_alive(), (
+        "second worker must be dead before the degrade-disable sync_turn; "
+        "if join timed out the next assertion would silently flake"
+    )
 
     with caplog.at_level(logging.CRITICAL, logger="hermes_icm_memory.hooks"):
         initialized_provider.sync_turn(user_content="u", assistant_content="a")
 
     assert initialized_provider._writes_disabled is True
-    # Tightened (Blind#6) — filter by logger AND assert message-content keyword
-    # so an unrelated CRITICAL doesn't satisfy the assertion.
+    # Filter by logger AND assert message-content keyword so an unrelated
+    # CRITICAL emitted by some other subsystem doesn't satisfy the assertion.
     critical_records = [
         r for r in caplog.records
         if r.levelno == logging.CRITICAL and r.name == "hermes_icm_memory.hooks"
@@ -491,7 +494,7 @@ def test_mode7_worker_dies_twice_degrades_with_critical(
     )
 
     # Subsequent enqueues are no-ops — respawn count + writes_disabled stay put,
-    # no new task is enqueued, no exception escapes (Blind#14 + Edge#3).
+    # no new task is enqueued, no exception escapes.
     pre_count = initialized_provider._respawn_count
     queue_obj = initialized_provider._write_queue
     pre_qsize = queue_obj.qsize() if queue_obj is not None else 0
@@ -545,9 +548,8 @@ def test_mode8_hermes_home_unwritable_self_disables(
 def test_mode8_self_disable_is_sticky_across_reinit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_hermes_home: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Mode 8 follow-up — ``_available=False`` survives a successful re-init (Edge#5).
+    """Mode 8 follow-up — ``_available=False`` survives a successful re-init.
 
     Once ``initialize`` self-disables (because ``mkdir_parent`` raised), a
     later re-init with DIFFERENT args must not re-enable the provider — the
@@ -556,27 +558,33 @@ def test_mode8_self_disable_is_sticky_across_reinit(
     ``is_available()`` and would silently start hitting subprocess again if
     the flag flipped back).
     """
-    fail_count = {"n": 0}
+    mkdir_calls = {"n": 0}
 
-    def _raise_perm_once(_db_path: Path) -> None:
-        fail_count["n"] += 1
-        if fail_count["n"] == 1:
+    def _raise_perm_first_call_only(_db_path: Path) -> None:
+        mkdir_calls["n"] += 1
+        if mkdir_calls["n"] == 1:
             raise PermissionError("read-only filesystem")
-        # Subsequent calls "succeed" — proves stickiness even when the
-        # underlying error condition has cleared.
+        # Second call returns ``None`` (matches ``mkdir_parent``'s real
+        # signature) — simulates the underlying error condition clearing.
 
-    monkeypatch.setattr("hermes_icm_memory.config.mkdir_parent", _raise_perm_once)
+    monkeypatch.setattr(
+        "hermes_icm_memory.config.mkdir_parent", _raise_perm_first_call_only
+    )
 
     provider = IcmMemoryProvider()
-
-    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.provider"):
-        provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
+    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
     assert provider.is_available() is False
+    assert mkdir_calls["n"] == 1, "first initialize must call mkdir_parent exactly once"
 
-    # Re-init with different args: mkdir_parent succeeds this time, but the
-    # sticky-False on ``_available`` must be preserved.
+    # Re-init with different args: ``mkdir_parent`` is invoked again (not
+    # short-circuited by ``_init_args``) and now returns successfully — but
+    # the sticky-False on ``_available`` must be preserved.
     provider.initialize(
         session_id="s2", hermes_home=tmp_hermes_home, profile="other"
+    )
+    assert mkdir_calls["n"] == 2, (
+        "re-init with different args must re-invoke mkdir_parent; "
+        "without this the stickiness assertion below would pass trivially"
     )
     assert provider.is_available() is False, (
         "re-init with different args must not flip _available back to True; "
@@ -587,14 +595,7 @@ def test_mode8_self_disable_is_sticky_across_reinit(
 # ---------- AC2: stress sub-test --------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("mode_id", "stub"),
-    [
-        ("mode2_nonzero", _stub_run_nonzero),
-        ("mode3_timeout", _stub_run_timeout),
-        ("mode4_malformed", _stub_run_malformed),
-    ],
-)
+@pytest.mark.parametrize(("mode_id", "stub"), _ALL_SUBPROC_FAILURE_MODES)
 def test_stress_subprocess_failure_no_escape_under_burst(
     mode_id: str,
     stub: Any,
@@ -612,8 +613,8 @@ def test_stress_subprocess_failure_no_escape_under_burst(
     monkeypatch.setattr("hermes_icm_memory.cli_runner.subprocess.run", stub)
 
     iterations = 100
-    # Filter by logger (Blind#8) so an unrelated WARNING from another
-    # subsystem doesn't inflate the count and break the strict equality.
+    # Filter by logger so an unrelated WARNING from another subsystem
+    # doesn't inflate the count and break the strict equality.
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.tools"):
         for _ in range(iterations):
             out = initialized_provider.handle_tool_call("icm_recall", {"query": "x"})
