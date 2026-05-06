@@ -32,6 +32,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from hermes_icm_memory import cli_runner
+from hermes_icm_memory.errors import (
+    ICMMalformedOutputError,
+    ICMNonZeroExitError,
+    ICMTimeoutError,
+)
 from hermes_icm_memory.provider import IcmMemoryProvider
 
 # ---------- Shared fixtures + helpers ---------------------------------------
@@ -179,9 +184,9 @@ def test_modes_2_3_4_subprocess_failure_degrades_prefetch(
     # code dropped this and made the 2026-05-06 Pi outage undebuggable.
     rendered = [r.getMessage() for r in warnings]
     expected_exc_classes = {
-        "mode2_nonzero": "ICMNonZeroExitError",
-        "mode3_timeout": "ICMTimeoutError",
-        "mode4_malformed": "ICMMalformedOutputError",
+        "mode2_nonzero": ICMNonZeroExitError.__name__,
+        "mode3_timeout": ICMTimeoutError.__name__,
+        "mode4_malformed": ICMMalformedOutputError.__name__,
     }
     needle = expected_exc_classes[mode_id]
     assert any(needle in msg for msg in rendered), (

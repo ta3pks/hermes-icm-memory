@@ -259,6 +259,7 @@ class IcmMemoryProvider:
             return ""
         if not self.is_available():
             return ""
+        recall_limit = self._config_int("recall_limit")
         # v0.1.1: ``_db_path is None`` is a legitimate "use icm canonical
         # default DB" sentinel (default-shared mode), not a "not initialized"
         # signal. The ``_init_args`` check upstream handles the latter.
@@ -266,24 +267,30 @@ class IcmMemoryProvider:
             hooks.run_prefetch(
                 query=query,
                 db_path=self._db_path,
-                limit=self._config_int("recall_limit"),
+                limit=recall_limit,
                 timeout_ms=self._config_int("command_timeout_read_ms"),
                 cache=self._prefetch_cache,
                 use_embeddings=self._config_bool("use_embeddings"),
             )
-        except Exception as exc:  # belt-and-braces; helper already swallows
+        except Exception as exc:  # AD-07 boundary — helper already swallows
             logger.warning(
                 "prefetch: outer boundary caught: %r",
                 exc,
                 extra={"err": repr(exc)},
             )
             return ""
-        self._latest_prefetch_key = hash(query)
+        # Bound the cache to the latest entry. ``system_prompt_block`` only
+        # reads ``_latest_prefetch_key`` (NFR-PERF-4), so older entries are
+        # dead weight that would otherwise leak monotonically across the
+        # gateway's lifetime.
+        latest_key = hash(query)
+        self._prefetch_cache = {latest_key: self._prefetch_cache.get(latest_key, [])}
+        self._latest_prefetch_key = latest_key
         # ``format_block`` returns ``""`` on empty hits — no extra short-circuit.
         return hooks.format_block(
             cache=self._prefetch_cache,
-            latest_key=self._latest_prefetch_key,
-            recall_limit=self._config_int("recall_limit"),
+            latest_key=latest_key,
+            recall_limit=recall_limit,
         )
 
     # ------------------------------------------------------------------ system_prompt_block
@@ -367,13 +374,11 @@ class IcmMemoryProvider:
     # ------------------------------------------------------------------ shutdown
 
     def shutdown(self) -> None:
-        """Hermes lifecycle hook — no-op in v0.3 (no daemon to manage).
+        """Hermes lifecycle hook — no-op in v0.3.
 
-        Defined explicitly so hermes-agent's memory_manager doesn't log
-        ``'IcmMemoryProvider' object has no attribute 'shutdown'`` at gateway
-        restart. The v0.2 ``icm serve`` daemon previously torn down here is
-        owned by hermes-native ``mcp_servers.icm:`` in v0.3 (AD-21). If a
-        future revision adds teardown side-effects, wrap them in the AD-07
-        catch-and-degrade pattern (see :meth:`on_session_end` for the shape).
+        Defined explicitly so hermes-agent's ``memory_manager`` no longer
+        logs ``'IcmMemoryProvider' object has no attribute 'shutdown'`` on
+        gateway restart. The v0.2 daemon torn down here is now owned by
+        hermes-native ``mcp_servers.icm:`` (AD-21).
         """
         return None
