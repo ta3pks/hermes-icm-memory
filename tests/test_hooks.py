@@ -344,9 +344,8 @@ def test_sync_turn_swallows_exceptions(
     initialized_provider._ensure_worker()
 
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
-        result = initialized_provider.sync_turn(user_content="u", assistant_content="a")
+        initialized_provider.sync_turn(user_content="u", assistant_content="a")
 
-    assert result is None
     assert any(
         "sync_turn" in record.message for record in caplog.records
     ), f"expected WARNING about sync_turn; got {[r.message for r in caplog.records]!r}"
@@ -377,15 +376,11 @@ def test_worker_drains_fifo_order(
     monkeypatch.setattr(cli_runner, "run_store", fake_run_store)
 
     initialized_provider._ensure_worker()
-    initialized_provider._write_queue.put_nowait(
-        WriteTask(topic="A", importance="high", content="c", keywords=())
-    )
-    initialized_provider._write_queue.put_nowait(
-        WriteTask(topic="B", importance="high", content="c", keywords=())
-    )
-    initialized_provider._write_queue.put_nowait(
-        WriteTask(topic="C", importance="high", content="c", keywords=())
-    )
+    queue = initialized_provider._write_queue
+    assert queue is not None
+    queue.put_nowait(WriteTask(topic="A", importance="high", content="c", keywords=()))
+    queue.put_nowait(WriteTask(topic="B", importance="high", content="c", keywords=()))
+    queue.put_nowait(WriteTask(topic="C", importance="high", content="c", keywords=()))
 
     # Wait for the queue to drain or timeout.
     deadline = time.monotonic() + 2.0
@@ -428,12 +423,10 @@ def test_worker_survives_run_store_exception(
     monkeypatch.setattr(cli_runner, "run_store", fake_run_store)
 
     initialized_provider._ensure_worker()
-    initialized_provider._write_queue.put_nowait(
-        WriteTask(topic="A", importance="high", content="c", keywords=())
-    )
-    initialized_provider._write_queue.put_nowait(
-        WriteTask(topic="B", importance="high", content="c", keywords=())
-    )
+    queue = initialized_provider._write_queue
+    assert queue is not None
+    queue.put_nowait(WriteTask(topic="A", importance="high", content="c", keywords=()))
+    queue.put_nowait(WriteTask(topic="B", importance="high", content="c", keywords=()))
 
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
@@ -502,17 +495,17 @@ def test_on_session_end_drains_within_grace(
     monkeypatch.setattr(cli_runner, "run_store", lambda *a, **kw: None)
     initialized_provider._config = {"session_end_grace_ms": 1000}
     initialized_provider._ensure_worker()
+    queue = initialized_provider._write_queue
+    assert queue is not None
     for _ in range(5):
-        initialized_provider._write_queue.put_nowait(
-            WriteTask(topic="A", importance="high", content="c", keywords=())
-        )
+        queue.put_nowait(WriteTask(topic="A", importance="high", content="c", keywords=()))
 
     started = time.monotonic()
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
         initialized_provider.on_session_end()
     elapsed_ms = (time.monotonic() - started) * 1000
 
-    assert initialized_provider._write_queue.empty(), "queue should drain within grace"
+    assert queue.empty(), "queue should drain within grace"
     drop_warns = [r for r in caplog.records if "drop" in r.message.lower()]
     assert drop_warns == [], f"unexpected drop WARNINGs: {[r.message for r in drop_warns]!r}"
     assert elapsed_ms < 1100.0, f"on_session_end took {elapsed_ms:.0f} ms (> grace + 100 ms)"
@@ -533,10 +526,10 @@ def test_on_session_end_drops_remaining_with_warning(
     monkeypatch.setattr(cli_runner, "run_store", slow_store)
     initialized_provider._config = {"session_end_grace_ms": 100}
     initialized_provider._ensure_worker()
+    queue = initialized_provider._write_queue
+    assert queue is not None
     for _ in range(5):
-        initialized_provider._write_queue.put_nowait(
-            WriteTask(topic="A", importance="high", content="c", keywords=())
-        )
+        queue.put_nowait(WriteTask(topic="A", importance="high", content="c", keywords=()))
 
     started = time.monotonic()
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
