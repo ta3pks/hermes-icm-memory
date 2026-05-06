@@ -398,21 +398,36 @@ _mcp_disabled: bool = False
 _mcp_atexit_registered: bool = False
 
 
+def _terminate_daemon(daemon: _McpDaemon) -> None:
+    """Close stdin → terminate → wait, with a kill fallback on timeout.
+
+    Caller MUST hold :data:`_mcp_lifecycle_lock`. Every step is wrapped in
+    ``contextlib.suppress`` so a teardown can't raise — used by ``mcp_stop``,
+    ``_mcp_respawn_locked``, and ``_mcp_reset_state_for_tests``.
+    """
+    with contextlib.suppress(Exception):
+        if daemon.proc.stdin is not None:
+            daemon.proc.stdin.close()
+    try:
+        daemon.proc.terminate()
+        daemon.proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(Exception):
+            daemon.proc.kill()
+    except Exception as exc:  # noqa: BLE001 — defensive teardown
+        logger.debug("_terminate_daemon: terminate raised", extra={"err": repr(exc)})
+
+
 def _mcp_reset_state_for_tests() -> None:
     """Test-only helper: clear daemon state without sending JSON-RPC.
 
     Held under :data:`_mcp_lifecycle_lock` — a test-side reset shouldn't
-    be able to race a producer thread that's mid-call against the daemon
-    being reset.
+    race a producer thread mid-call against the daemon being reset.
     """
     global _mcp_state, _mcp_disabled
     with _mcp_lifecycle_lock:
         if _mcp_state is not None:
-            with contextlib.suppress(Exception):
-                if _mcp_state.proc.stdin is not None:
-                    _mcp_state.proc.stdin.close()
-            with contextlib.suppress(Exception):
-                _mcp_state.proc.terminate()
+            _terminate_daemon(_mcp_state)
         _mcp_state = None
         _mcp_disabled = False
 
@@ -451,19 +466,8 @@ def mcp_stop() -> None:
     with _mcp_lifecycle_lock:
         daemon = _mcp_state
         _mcp_state = None
-        if daemon is None:
-            return
-        with contextlib.suppress(Exception):
-            if daemon.proc.stdin is not None:
-                daemon.proc.stdin.close()
-        try:
-            daemon.proc.terminate()
-            daemon.proc.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(Exception):
-                daemon.proc.kill()
-        except Exception as exc:  # noqa: BLE001 — defensive teardown
-            logger.debug("mcp_stop: terminate raised", extra={"err": repr(exc)})
+        if daemon is not None:
+            _terminate_daemon(daemon)
 
 
 def _mcp_spawn(*, db_path: Path | None, use_embeddings: bool) -> _McpDaemon:
@@ -653,8 +657,9 @@ def _mcp_respawn_locked() -> None:
     """Tear down the dead daemon and start a fresh one with cached args.
 
     MUST be called with :data:`_mcp_lifecycle_lock` already held — the
-    caller is :func:`_mcp_call`. Inlines the teardown rather than calling
-    :func:`mcp_stop` so we don't double-acquire the (non-reentrant) lock.
+    caller is :func:`_mcp_call`. Inlines through :func:`_terminate_daemon`
+    rather than calling :func:`mcp_stop` so we don't double-acquire the
+    (non-reentrant) lock.
     """
     global _mcp_state
     cached_db: Path | None = None
@@ -663,13 +668,9 @@ def _mcp_respawn_locked() -> None:
     if daemon is not None:
         cached_db = daemon.cached_db_path
         cached_embed = daemon.cached_use_embeddings
-        with contextlib.suppress(Exception):
-            if daemon.proc.stdin is not None:
-                daemon.proc.stdin.close()
-        with contextlib.suppress(Exception):
-            daemon.proc.terminate()
-        with contextlib.suppress(Exception):
-            daemon.proc.wait(timeout=2.0)
+        _terminate_daemon(daemon)
+    # Clear state before re-spawning so a spawn failure leaves _mcp_state=None
+    # rather than pointing at the dead daemon.
     _mcp_state = None
     _mcp_state = _mcp_spawn(db_path=cached_db, use_embeddings=cached_embed)
 
