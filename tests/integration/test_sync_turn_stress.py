@@ -43,9 +43,11 @@ def test_overflow_fifo_warning_no_exception(
     provider = IcmMemoryProvider()
     assert provider.is_available()
 
-    # Shrink the queue to make overflow tractable in test time.
+    # Shrink the queue to make overflow tractable in test time. Also flip on
+    # ``isolated`` so the worker spawns against a concrete tmp_path-bound DB
+    # (v0.1.1: writes are isolated-only).
     err = provider.save_config(
-        {"sync_write_queue_size": _QUEUE_CAP},
+        {"sync_write_queue_size": _QUEUE_CAP, "isolated": True},
         hermes_home=str(tmp_path),
     )
     assert err is None

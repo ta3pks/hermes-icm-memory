@@ -99,7 +99,7 @@ class WorkerState:
 def worker_loop(
     *,
     write_queue: queue.Queue[WriteTask],
-    db_path: Path,
+    db_path: Path | None,
     timeout_ms: int,
     overflow_burst: list[bool],
     stop_event: threading.Event,
@@ -147,7 +147,7 @@ def ensure_worker(
     state: WorkerState,
     *,
     queue_size: int,
-    db_path: Path,
+    db_path: Path | None,
     write_timeout_ms: int,
 ) -> bool:
     """Create the queue + spawn the worker on first need; respawn if dead.
@@ -187,7 +187,7 @@ def ensure_worker(
 
 def _spawn_worker(
     state: WorkerState,
-    db_path: Path,
+    db_path: Path | None,
     timeout_ms: int,
 ) -> threading.Thread:
     """Construct and start a fresh daemon worker bound to ``state``."""
@@ -214,10 +214,11 @@ def _spawn_worker(
 def run_prefetch(
     *,
     query: str,
-    db_path: Path,
+    db_path: Path | None,
     limit: int,
     timeout_ms: int,
     cache: dict[int, list[dict[str, Any]]],
+    use_embeddings: bool = False,
 ) -> list[dict[str, Any]]:
     """Run a single recall, cache hits keyed by ``hash(query)``.
 
@@ -225,6 +226,10 @@ def run_prefetch(
     and stores ``[]`` in the cache so :func:`format_block` does not retry.
     Logs WARNING with ``extra={"err": ..., "query_hash": ...}``. **Never
     raises.**
+
+    v0.1.1 — ``db_path`` may be ``None`` (default-shared mode lets ``icm``
+    use its canonical OS-default DB) and ``use_embeddings`` controls the
+    ``--no-embeddings`` flag in ``cli_runner.run_recall``.
     """
     key = hash(query)
     try:
@@ -233,6 +238,7 @@ def run_prefetch(
             limit=limit,
             db_path=db_path,
             timeout_ms=timeout_ms,
+            use_embeddings=use_embeddings,
         )
     except ICMError as exc:
         logger.warning(

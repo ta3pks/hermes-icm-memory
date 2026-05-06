@@ -171,6 +171,18 @@ def _read_timeout_ms(provider: IcmMemoryProvider) -> int:
     )
 
 
+def _use_embeddings(provider: IcmMemoryProvider) -> bool:
+    """Resolve the ``use_embeddings`` flag from provider config (default ``True``).
+
+    v0.1.1: matches the schema default — semantic recall is the Brief's value
+    prop and is safe on desktop / cloud hardware. Pi-class operators opt out
+    via ``use_embeddings: false`` in their hermes config. Non-bool / missing
+    values silently fall back to ``True`` (the schema default).
+    """
+    raw = _provider_config(provider).get("use_embeddings", True)
+    return raw if isinstance(raw, bool) else True
+
+
 def _recall_limit(provider: IcmMemoryProvider, override: object) -> int:
     """Resolve the recall limit from caller arg, then config, then default."""
     return (
@@ -232,11 +244,17 @@ def _run_read(
     so each handler can shape ``cli_runner``'s positional args itself
     (``run_recall`` leads with ``query, limit``; ``run_topics`` /
     ``run_health`` lead with ``db_path, timeout_ms``).
+
+    v0.1.1: the "not initialized" guard checks ``provider._init_args`` —
+    ``_db_path is None`` is a *legitimate* state under default-shared mode
+    (the plugin lets ``icm`` use its canonical OS-default DB, no ``--db``
+    forwarded). The actual "never initialized" condition is ``_init_args``
+    being ``None``.
     """
-    db_path = provider._db_path
-    if db_path is None:
+    if provider._init_args is None:
         logger.warning("%s: provider not initialized", name, extra={"tool": name})
         return json.dumps(_EMPTY_READ_PAYLOAD[name])
+    db_path = provider._db_path
     try:
         result = do_call(db_path, _read_timeout_ms(provider))
     except Exception as exc:  # noqa: BLE001 — every read path degrades, never raises.
@@ -260,12 +278,21 @@ def _handle_recall(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
     limit = _recall_limit(provider, args.get("limit"))
     topic = args.get("topic") if isinstance(args.get("topic"), str) else None
     project = args.get("project") if isinstance(args.get("project"), str) else None
+    use_embeddings = _use_embeddings(provider)
 
     return _run_read(
         provider,
         "icm_recall",
         "hits",
-        lambda db, ms: run_recall(query, limit, db, ms, topic=topic, project=project),
+        lambda db, ms: run_recall(
+            query,
+            limit,
+            db,
+            ms,
+            use_embeddings=use_embeddings,
+            topic=topic,
+            project=project,
+        ),
     )
 
 

@@ -46,6 +46,10 @@ def test_store_then_recall_returns_hit(
 ) -> None:
     provider = IcmMemoryProvider()
     assert provider.is_available()
+    # v0.1.1: writes need a concrete ``_db_path`` (worker spawn gated on
+    # ``_db_path is not None``); the integration round-trip uses a
+    # ``tmp_path``-bound file, so opt into ``isolated=True``.
+    provider._config["isolated"] = True
     provider.initialize("s14-recall", str(tmp_path))
 
     # Spawn the worker (icm_store needs the queue to exist).

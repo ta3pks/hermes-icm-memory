@@ -54,6 +54,17 @@ Three steps, under five minutes on a machine where `icm` is already installed.
 
 User-tunable keys (importance default, recall limit, queue size, timeouts, prefetch toggle, etc.) are documented in [`_bmad-output/planning-artifacts/architecture.md`](./_bmad-output/planning-artifacts/architecture.md) §10.1. Configure via `hermes memory setup icm` or by editing the Hermes memory provider config for your profile.
 
+### v0.1.1 — sharing vs. isolation, embeddings vs. keyword-only
+
+Two keys control the trade-offs surfaced by the Pi 4 deploy on 2026-05-06; both default to the safer-for-most-users option:
+
+- **`isolated`** *(bool, default `false`)* — when `false`, the plugin omits `--db` and lets `icm` use its canonical OS-default database (the same SQLite file Claude Code, Cursor, OpenCode, etc. already share). This is the brief's "shared memory with editors" value prop. Set to `true` to opt into the v0.1.0 behaviour: a per-profile silo at `<hermes_home>/icm/<profile>.db`. Profile isolation requires `isolated: true`.
+- **`use_embeddings`** *(bool, default `true`)* — when `true`, `icm recall` uses semantic search via the configured icm embedding model (the Brief's value prop). Set to `false` on Pi-class hardware or anywhere the multilingual-e5-base ONNX model load (~50 s per subprocess invocation on a 4 GB Pi 4) blows past `command_timeout_read_ms`. Desktop / cloud hosts handle the default fine. v0.2's `icm-serve` MCP transport will amortize the model load and retire the need for the opt-out.
+
+> 🚨 **Pi-class operators:** add `use_embeddings: false` to your hermes config for now — `icm recall` will use keyword-only fusion (instant, no ONNX cold start) instead of full semantic search.
+
+**Limitation.** Writes (`sync_turn` → bounded queue → daemon worker) still require a concrete `_db_path`, so under the default `isolated: false` the worker no-ops and writes are dropped silently. Operators who need writes today should set `isolated: true`. Shared-DB writes against the canonical icm file (concurrent-writer semantics with editors) is a v0.2 concern. See [CHANGELOG.md](./CHANGELOG.md) for the full migration note.
+
 ## Development
 
 Contributions welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev install, the lint / type-check / test loop, the coverage gate, and the TDD policy.

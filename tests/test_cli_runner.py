@@ -45,7 +45,13 @@ def _ok(stdout: str = "[]", stderr: str = "", returncode: int = 0) -> MagicMock:
 
 
 def test_run_recall_argv_shape_default() -> None:
-    """argv has the locked default shape when topic and project are None."""
+    """argv has the locked default shape when topic and project are None.
+
+    v0.1.1: ``use_embeddings`` defaults to ``True`` (the Brief's semantic-recall
+    value prop), so ``--no-embeddings`` is **not** appended by default. Pi-class
+    operators opt out via the config key, which threads a ``use_embeddings=False``
+    kwarg here and re-adds the flag.
+    """
     with patch(RUN_TARGET, return_value=_ok("[]")) as run:
         cli_runner.run_recall(query="hello", limit=5, db_path=DB, timeout_ms=2000)
     argv = run.call_args.args[0]
@@ -75,6 +81,53 @@ def test_run_recall_argv_shape_with_topic_and_project() -> None:
         )
     argv = run.call_args.args[0]
     assert argv[-4:] == ["-t", "errors-resolved", "-p", "hermes-icm-memory"]
+
+
+def test_run_recall_argv_with_use_embeddings_false_appends_flag() -> None:
+    """v0.1.1 — ``use_embeddings=False`` appends ``--no-embeddings``.
+
+    The Pi-class escape hatch: keyword-only recall when the embedding-model
+    cold start would blow past ``command_timeout_read_ms``.
+    """
+    with patch(RUN_TARGET, return_value=_ok("[]")) as run:
+        cli_runner.run_recall(
+            query="hello",
+            limit=5,
+            db_path=DB,
+            timeout_ms=2000,
+            use_embeddings=False,
+        )
+    argv = run.call_args.args[0]
+    assert "--no-embeddings" in argv
+    # Flag appears after the locked --format json pair, before any topic/project args.
+    assert argv == [
+        "icm",
+        "--db",
+        str(DB),
+        "recall",
+        "hello",
+        "--limit",
+        "5",
+        "--format",
+        "json",
+        "--no-embeddings",
+    ]
+
+
+def test_run_recall_argv_with_db_path_none_omits_db_flag() -> None:
+    """v0.1.1 — ``db_path=None`` omits ``--db`` so icm uses its canonical default.
+
+    Implements the brief's "shared with editors, not a parallel silo" promise:
+    when the plugin runs in default-shared mode, ``cli_runner`` lets icm pick
+    its OS-default DB (e.g. ``~/.local/share/icm/memories.db`` on Linux).
+    """
+    with patch(RUN_TARGET, return_value=_ok("[]")) as run:
+        cli_runner.run_recall(query="x", limit=5, db_path=None, timeout_ms=2000)
+    argv = run.call_args.args[0]
+    assert "--db" not in argv
+    # First two argv elements are the binary name and the subcommand.
+    assert argv[0] == "icm"
+    assert argv[1] == "recall"
 
 
 def test_run_recall_returns_parsed_list() -> None:

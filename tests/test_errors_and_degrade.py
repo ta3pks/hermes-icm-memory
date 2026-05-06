@@ -67,10 +67,14 @@ from hermes_icm_memory.provider import IcmMemoryProvider
 def initialized_provider(tmp_hermes_home: Path) -> IcmMemoryProvider:
     """Provider with ``initialize()`` called, ``_available=True``, worker spun-up.
 
-    Mirrors ``tests/test_hooks.py::initialized_provider`` so the failure-mode
-    tests share its proven setup pattern.
+    v0.1.1: opts into ``isolated=True`` *before* ``initialize`` so ``_db_path``
+    becomes a concrete path — the worker is gated on ``_db_path is not None``,
+    and these failure-mode tests need the worker spun up to exercise it.
+    Tests of the v0.1.1 default-shared behaviour (``_db_path is None``) use
+    a separate fixture or construct providers directly.
     """
     provider = IcmMemoryProvider()
+    provider._config["isolated"] = True
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
     provider._available = True
     provider._ensure_worker()
@@ -147,6 +151,8 @@ def test_mode1_icm_not_on_path_degrades_silently(
     monkeypatch.setattr("hermes_icm_memory.cli_runner.subprocess.run", spy)
 
     provider = IcmMemoryProvider()
+    # v0.1.1 default-shared mode is fine here — the read tools' guard now
+    # checks ``_init_args`` (set by ``initialize``), not ``_db_path``.
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
 
     assert provider.is_available() is False, "shutil.which → None must flip is_available to False"
@@ -534,6 +540,9 @@ def test_mode8_hermes_home_unwritable_self_disables(
     monkeypatch.setattr("hermes_icm_memory.config.mkdir_parent", _raise_perm)
 
     provider = IcmMemoryProvider()
+    # v0.1.1: ``mkdir_parent`` only fires under ``isolated=True``; opt in so
+    # the OSError → self-disable branch is reachable at all.
+    provider._config["isolated"] = True
 
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.provider"):
         provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
@@ -572,6 +581,9 @@ def test_mode8_self_disable_is_sticky_across_reinit(
     )
 
     provider = IcmMemoryProvider()
+    # v0.1.1: the OSError → self-disable path lives under ``isolated=True``;
+    # default-shared never touches the filesystem during ``initialize``.
+    provider._config["isolated"] = True
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
     assert provider.is_available() is False
     assert mkdir_calls["n"] == 1, "first initialize must call mkdir_parent exactly once"

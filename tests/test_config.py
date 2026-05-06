@@ -16,7 +16,8 @@ import pytest
 
 from hermes_icm_memory import config
 
-# Architecture §10.1 — the ten frozen config keys.
+# Architecture §10.1 — the original ten frozen config keys plus the two v0.1.1
+# additions (``isolated``, ``use_embeddings``).
 _EXPECTED_KEYS: set[str] = {
     "default_importance",
     "topic_prefix",
@@ -28,14 +29,21 @@ _EXPECTED_KEYS: set[str] = {
     "session_end_grace_ms",
     "periodic_progress_every_n_turns",
     "consolidate_on_session_end",
+    # v0.1.1 additions:
+    "isolated",
+    "use_embeddings",
 }
 
 
-def test_default_schema_has_ten_keys() -> None:
-    """Schema covers exactly the ten architecture §10.1 keys with required fields."""
+def test_default_schema_has_twelve_keys() -> None:
+    """Schema covers exactly the twelve config keys with required fields.
+
+    Ten architecture §10.1 keys + two v0.1.1 additions
+    (``isolated``, ``use_embeddings``).
+    """
     schema = config.get_default_schema()
     assert isinstance(schema, list)
-    assert len(schema) == 10
+    assert len(schema) == 12
     keys = {entry["key"] for entry in schema}
     assert keys == _EXPECTED_KEYS, f"unexpected schema keys: {keys ^ _EXPECTED_KEYS}"
     for entry in schema:
@@ -170,6 +178,66 @@ def test_validate_passes_through_unknown_keys() -> None:
     assert ok is True
     assert normalized["future_key_v2"] == "anything"
     assert normalized["recall_limit"] == 7
+
+
+def test_isolated_default_is_false() -> None:
+    """v0.1.1 — ``isolated`` defaults to False (brief's shared-with-editors path)."""
+    schema = {entry["key"]: entry for entry in config.get_default_schema()}
+    assert schema["isolated"]["type"] == "bool"
+    assert schema["isolated"]["default"] is False
+
+
+def test_use_embeddings_default_is_true() -> None:
+    """v0.1.1 — ``use_embeddings`` defaults to True (Brief's semantic-recall value prop).
+
+    Pi-class operators opt out via ``use_embeddings: false`` in their hermes
+    config. The schema default favours desktop / cloud hosts (the majority).
+    """
+    schema = {entry["key"]: entry for entry in config.get_default_schema()}
+    assert schema["use_embeddings"]["type"] == "bool"
+    assert schema["use_embeddings"]["default"] is True
+
+
+def test_validate_accepts_isolated_true_and_false() -> None:
+    """``isolated`` accepts true/false bool values (and string coercion)."""
+    ok, normalized = config.validate({"isolated": True})
+    assert ok and normalized["isolated"] is True
+    ok, normalized = config.validate({"isolated": False})
+    assert ok and normalized["isolated"] is False
+    ok, normalized = config.validate({"isolated": "true"})
+    assert ok and normalized["isolated"] is True
+    ok, normalized = config.validate({"isolated": "FALSE"})
+    assert ok and normalized["isolated"] is False
+
+
+def test_validate_rejects_non_bool_for_isolated() -> None:
+    """Numbers / random strings for ``isolated`` are rejected."""
+    ok, payload = config.validate({"isolated": 42})
+    assert ok is False
+    assert "isolated" in payload["error"]
+    ok, payload = config.validate({"isolated": "maybe"})
+    assert ok is False
+    assert "isolated" in payload["error"]
+
+
+def test_validate_accepts_use_embeddings_true_and_false() -> None:
+    """``use_embeddings`` accepts true/false bool values (and string coercion)."""
+    ok, normalized = config.validate({"use_embeddings": True})
+    assert ok and normalized["use_embeddings"] is True
+    ok, normalized = config.validate({"use_embeddings": False})
+    assert ok and normalized["use_embeddings"] is False
+    ok, normalized = config.validate({"use_embeddings": "true"})
+    assert ok and normalized["use_embeddings"] is True
+
+
+def test_validate_rejects_non_bool_for_use_embeddings() -> None:
+    """Numbers / random strings for ``use_embeddings`` are rejected."""
+    ok, payload = config.validate({"use_embeddings": 1})
+    assert ok is False
+    assert "use_embeddings" in payload["error"]
+    ok, payload = config.validate({"use_embeddings": "maybe"})
+    assert ok is False
+    assert "use_embeddings" in payload["error"]
 
 
 def test_resolve_db_path_default_profile(tmp_path: Path) -> None:

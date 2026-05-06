@@ -129,10 +129,24 @@ def run_recall(
     limit: int,
     db_path: Path | None,
     timeout_ms: int,
+    *,
+    use_embeddings: bool = True,
     topic: str | None = None,
     project: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Run ``icm recall`` and return the parsed JSON list of hits."""
+    """Run ``icm recall`` and return the parsed JSON list of hits.
+
+    ``use_embeddings`` controls whether ``--no-embeddings`` is appended to argv:
+
+    * ``True`` (default, v0.1.1) — omits the flag so ``icm`` uses its configured
+      embedding model and runs full semantic search. This is the Brief's value
+      prop and the right behaviour for desktop / cloud hosts.
+    * ``False`` — appends ``--no-embeddings`` for keyword-only recall. The
+      escape hatch for Pi-class hardware where the multilingual-e5-base ONNX
+      model load costs ~50s per subprocess invocation (model loads from scratch
+      every call; the OS page cache helps but doesn't amortize ONNX init).
+      v0.2's ``icm-serve`` MCP transport will retire the need for this flag.
+    """
     argv: list[str] = [
         "icm",
         *_db_args(db_path),
@@ -143,6 +157,8 @@ def run_recall(
         "--format",
         "json",
     ]
+    if not use_embeddings:
+        argv.append("--no-embeddings")
     if topic is not None:
         argv += ["-t", topic]
     if project is not None:
@@ -186,7 +202,7 @@ def run_store(
     _run(argv, timeout_ms)
 
 
-def run_topics(db_path: Path, timeout_ms: int) -> list[dict[str, Any]]:
+def run_topics(db_path: Path | None, timeout_ms: int) -> list[dict[str, Any]]:
     """Run ``icm topics`` (no ``--format json`` — recall-only on icm 0.10.43).
 
     Parses the aligned-table stdout: column splits on two-or-more spaces,

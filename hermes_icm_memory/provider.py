@@ -88,32 +88,45 @@ class IcmMemoryProvider:
         profile: str | None = None,
         **kwargs: Any,  # noqa: ARG002 — Hermes contract may pass extra kwargs.
     ) -> None:
-        """Resolve the per-profile DB path and ensure ``<hermes_home>/icm/`` exists.
+        """Record the session and (when opted in) resolve a per-profile DB path.
+
+        v0.1.1 default behaviour (``isolated=False``) — the brief's
+        "shared memory with editors" promise: ``_db_path`` stays ``None`` and
+        ``cli_runner`` omits ``--db`` so ``icm`` uses its OS-canonical default
+        DB (the same file Claude Code, Cursor, OpenCode, etc. share).
+
+        Opt-in (``isolated=True``) — restores v0.1.0 behaviour: resolves
+        ``<hermes_home>/icm/<profile>.db`` and ensures the parent dir exists
+        via :func:`config.mkdir_parent`.
 
         Idempotent on the same ``(session_id, hermes_home, profile)`` triple.
 
-        On ``OSError`` from :func:`config.mkdir_parent` (read-only filesystem),
-        logs a WARNING, sets ``_available = False`` (sticky), records the
-        failed args so re-calls with the same triple stay no-ops, and returns
-        without raising — failure-mode matrix §6.3 row 8.
+        On ``OSError`` from :func:`config.mkdir_parent` under ``isolated=True``
+        (read-only filesystem), logs a WARNING, sets ``_available = False``
+        (sticky), records the failed args so re-calls with the same triple
+        stay no-ops, and returns without raising — failure-mode matrix §6.3
+        row 8. Default-shared mode never reaches the OSError branch.
         """
         args_key = (session_id, str(hermes_home), profile)
         if self._init_args == args_key:
             return
 
-        try:
-            db_path = config.resolve_db_path(hermes_home, profile)
-            config.mkdir_parent(db_path)
-        except OSError as exc:
-            logger.warning(
-                "initialize failed: hermes_home not writable; provider self-disabling",
-                extra={"hermes_home": str(hermes_home), "err": repr(exc)},
-            )
-            self._available = False
-            self._init_args = args_key
-            return
+        if self._config_bool("isolated"):
+            try:
+                db_path = config.resolve_db_path(hermes_home, profile)
+                config.mkdir_parent(db_path)
+            except OSError as exc:
+                logger.warning(
+                    "initialize failed: hermes_home not writable; provider self-disabling",
+                    extra={"hermes_home": str(hermes_home), "err": repr(exc)},
+                )
+                self._available = False
+                self._init_args = args_key
+                return
+            self._db_path = db_path
+        # else: default-shared — ``_db_path`` stays ``None`` and ``cli_runner``
+        # omits ``--db`` so ``icm`` uses its canonical OS-default DB.
 
-        self._db_path = db_path
         self._session_id = session_id
         self._init_args = args_key
 
@@ -239,8 +252,11 @@ class IcmMemoryProvider:
         """
         if not self._config_bool("prefetch_enabled"):
             return ""
-        if not self.is_available() or self._db_path is None:
+        if not self.is_available():
             return ""
+        # v0.1.1: ``_db_path is None`` is a legitimate "use icm canonical
+        # default DB" sentinel (default-shared mode), not a "not initialized"
+        # signal. The ``_init_args`` check upstream handles the latter.
         try:
             hooks.run_prefetch(
                 query=query,
@@ -248,6 +264,7 @@ class IcmMemoryProvider:
                 limit=self._config_int("recall_limit"),
                 timeout_ms=self._config_int("command_timeout_read_ms"),
                 cache=self._prefetch_cache,
+                use_embeddings=self._config_bool("use_embeddings"),
             )
         except Exception as exc:  # belt-and-braces; helper already swallows
             logger.warning(
