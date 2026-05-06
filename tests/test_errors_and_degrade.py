@@ -52,7 +52,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from unittest.mock import MagicMock
 
 import pytest
@@ -98,11 +98,12 @@ def _stub_run_nonzero(*_a: Any, **_kw: Any) -> Any:
     return MagicMock(returncode=2, stdout="", stderr="boom: simulated non-zero exit")
 
 
-def _stub_run_timeout(*a: Any, **_kw: Any) -> Any:
+def _stub_run_timeout(*a: Any, **_kw: Any) -> NoReturn:
     """Mode 3 — ``subprocess.run`` raises ``TimeoutExpired``.
 
     The first positional arg in ``cli_runner._run`` is the ``argv`` list, so
     we forward it back to ``TimeoutExpired(cmd=…)`` as a faithful simulation.
+    ``-> NoReturn`` documents that this stub always raises (no fallthrough).
     """
     cmd = a[0] if a else ["icm"]
     raise subprocess.TimeoutExpired(cmd=cmd, timeout=2.0)
@@ -113,8 +114,11 @@ def _stub_run_malformed(*_a: Any, **_kw: Any) -> Any:
     return MagicMock(returncode=0, stdout="not valid json {{{", stderr="")
 
 
-def _stub_run_not_found(*_a: Any, **_kw: Any) -> Any:
-    """Mode 1 partner — ``subprocess.run`` raises ``FileNotFoundError`` (icm missing)."""
+def _stub_run_not_found(*_a: Any, **_kw: Any) -> NoReturn:
+    """Mode 1 partner — ``subprocess.run`` raises ``FileNotFoundError`` (icm missing).
+
+    ``-> NoReturn`` documents that this stub always raises (no fallthrough).
+    """
     raise FileNotFoundError("icm: command not found")
 
 
@@ -136,7 +140,19 @@ def test_mode1_icm_not_on_path_degrades_silently(
         * No exception escapes any entry-point.
     """
     monkeypatch.setattr(shutil, "which", lambda _name: None)
-    monkeypatch.setattr("hermes_icm_memory.cli_runner.subprocess.run", _stub_run_not_found)
+    # Counter-wrapped stub proves prefetch's is_available() guard short-circuits
+    # before reaching the subprocess boundary (guards against an Edge#10
+    # regression where prefetch starts bypassing is_available).
+    subprocess_calls = {"n": 0}
+
+    def _counting_not_found(*a: Any, **kw: Any) -> NoReturn:
+        subprocess_calls["n"] += 1
+        _stub_run_not_found(*a, **kw)
+        raise AssertionError("unreachable")  # for mypy NoReturn — _stub_ raised
+
+    monkeypatch.setattr(
+        "hermes_icm_memory.cli_runner.subprocess.run", _counting_not_found
+    )
 
     provider = IcmMemoryProvider()
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
@@ -145,16 +161,32 @@ def test_mode1_icm_not_on_path_degrades_silently(
 
     with caplog.at_level(logging.WARNING):
         recall_out = provider.handle_tool_call("icm_recall", {"query": "anything"})
+        calls_after_recall = subprocess_calls["n"]
         topics_out = provider.handle_tool_call("icm_topics", {})
         health_out = provider.handle_tool_call("icm_health", {})
+        calls_after_reads = subprocess_calls["n"]
         prefetch_out = provider.prefetch(query="anything")
+        calls_after_prefetch = subprocess_calls["n"]
 
     assert json.loads(recall_out) == {"hits": []}
     assert json.loads(topics_out) == {"topics": []}
     assert json.loads(health_out) == {"report": {}}
+    # Each read tool actually attempts the subprocess (and is caught at
+    # cli_runner) — proves the read paths really do fail through the typed
+    # exception channel rather than short-circuiting elsewhere.
+    assert calls_after_reads >= 3, (
+        f"expected ≥3 subprocess attempts across recall/topics/health; "
+        f"got {calls_after_reads}"
+    )
     # ``prefetch`` short-circuits on ``not is_available()`` and returns "" without
-    # invoking ``cli_runner`` — proves the cheaper guard wins over a subprocess hop.
+    # invoking ``cli_runner`` — guards Edge#10 (regression where prefetch
+    # bypasses the cheaper guard).
     assert prefetch_out == ""
+    assert calls_after_prefetch == calls_after_reads, (
+        f"prefetch must NOT invoke subprocess when is_available()=False; "
+        f"got {calls_after_prefetch - calls_after_reads} extra call(s)"
+    )
+    assert calls_after_recall >= 1  # used by mypy to keep variable live
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings, "expected at least one WARNING from the failed read paths"
@@ -163,41 +195,160 @@ def test_mode1_icm_not_on_path_degrades_silently(
 # ---------- Modes 2/3/4: subprocess-level failures degrade ------------------
 
 
-@pytest.mark.parametrize(
-    ("mode_id", "stub"),
-    [
-        ("mode2_nonzero", _stub_run_nonzero),
-        ("mode3_timeout", _stub_run_timeout),
-        ("mode4_malformed", _stub_run_malformed),
-    ],
-)
-def test_subprocess_failure_modes_degrade_to_empty_hits(
+# Per-tool (degrade-payload, mode-applicability) catalogue. Modes 2 & 3 are
+# transport failures (non-zero exit, timeout) — they degrade the same way
+# regardless of which read tool was invoked, so they apply to all three. Mode
+# 4 (malformed stdout) is parser-specific:
+#   * ``icm_recall`` parses with ``json.loads`` → JSONDecodeError → degrade.
+#   * ``icm_health`` parses ``key: value`` lines → raises
+#     ``ICMMalformedOutputError`` when stdout has no parseable lines.
+#   * ``icm_topics`` is text-permissive by design (single-column fallback in
+#     ``_parse_topics_table``) — there is no "malformed topics output" path.
+# So mode 4 cross-product excludes ``icm_topics``; the topics-parser
+# permissiveness is documented behaviour, not a gap.
+_READ_TOOLS: list[tuple[str, dict[str, Any]]] = [
+    ("icm_recall", {"hits": []}),
+    ("icm_topics", {"topics": []}),
+    ("icm_health", {"report": {}}),
+]
+_MODES_2_3 = [
+    ("mode2_nonzero", _stub_run_nonzero),
+    ("mode3_timeout", _stub_run_timeout),
+]
+_MODE_4_TOOLS: list[tuple[str, dict[str, Any]]] = [
+    ("icm_recall", {"hits": []}),
+    ("icm_health", {"report": {}}),
+]
+
+
+def _exercise_read_tool_degrade(
+    *,
+    provider: IcmMemoryProvider,
+    tool_name: str,
+    stub: Any,
+    expected_payload: dict[str, Any],
+    mode_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Shared assertion body for modes 2/3/4 × read tools.
+
+    Patches ``cli_runner.subprocess.run`` with ``stub``, calls the named
+    tool, and asserts: documented empty payload, ≥1 WARNING from
+    ``hermes_icm_memory.tools``, message names the tool. No exception
+    escapes (any leak surfaces as a pytest failure).
+    """
+    args: dict[str, Any] = {"query": "anything"} if tool_name == "icm_recall" else {}
+    monkeypatch.setattr("hermes_icm_memory.cli_runner.subprocess.run", stub)
+
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.tools"):
+        out = provider.handle_tool_call(tool_name, args)
+
+    parsed = json.loads(out)
+    assert parsed == expected_payload, (
+        f"{mode_id}/{tool_name}: expected {expected_payload!r}, got {parsed!r}"
+    )
+
+    warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "hermes_icm_memory.tools"
+    ]
+    assert warnings, (
+        f"{mode_id}/{tool_name}: expected at least one WARNING from "
+        f"hermes_icm_memory.tools logger"
+    )
+    assert any(
+        tool_name in r.message or getattr(r, "tool", None) == tool_name
+        for r in warnings
+    ), (
+        f"{mode_id}/{tool_name}: WARNINGs did not name {tool_name}: "
+        f"{[(r.message, getattr(r, 'tool', None)) for r in warnings]!r}"
+    )
+
+
+@pytest.mark.parametrize(("mode_id", "stub"), _MODES_2_3)
+@pytest.mark.parametrize(("tool_name", "expected_payload"), _READ_TOOLS)
+def test_modes_2_3_transport_failure_degrades_all_read_tools(
     mode_id: str,
     stub: Any,
+    tool_name: str,
+    expected_payload: dict[str, Any],
     initialized_provider: IcmMemoryProvider,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Modes 2/3/4 — subprocess-level failures degrade to ``{"hits": []}`` + WARNING.
+    """Modes 2 & 3 (non-zero exit, timeout) across all three read tools.
 
-    Each parametrized case patches ``cli_runner.subprocess.run`` with the
-    matching stub, calls ``handle_tool_call("icm_recall", …)``, and asserts
-    the documented degraded shape + WARNING + no-exception-escape.
+    Transport-level failures degrade identically regardless of parser, so the
+    full cross-product is exercised — guards against a regression where (e.g.)
+    ``icm_topics`` is wired to a different exception channel.
     """
-    monkeypatch.setattr("hermes_icm_memory.cli_runner.subprocess.run", stub)
+    _exercise_read_tool_degrade(
+        provider=initialized_provider,
+        tool_name=tool_name,
+        stub=stub,
+        expected_payload=expected_payload,
+        mode_id=mode_id,
+        monkeypatch=monkeypatch,
+        caplog=caplog,
+    )
 
-    with caplog.at_level(logging.WARNING):
-        out = initialized_provider.handle_tool_call("icm_recall", {"query": "anything"})
 
-    parsed = json.loads(out)
-    assert parsed == {"hits": []}, f"{mode_id}: expected empty hits, got {parsed!r}"
+@pytest.mark.parametrize(("tool_name", "expected_payload"), _MODE_4_TOOLS)
+def test_mode4_malformed_stdout_degrades_recall_and_health(
+    tool_name: str,
+    expected_payload: dict[str, Any],
+    initialized_provider: IcmMemoryProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mode 4 (malformed stdout) on JSON-parsing tools only.
 
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings, f"{mode_id}: expected at least one WARNING"
-    assert any(
-        "icm_recall" in r.message or "failed" in r.message.lower()
-        for r in warnings
-    ), f"{mode_id}: WARNING messages did not mention icm_recall: {[r.message for r in warnings]!r}"
+    ``icm_topics`` is excluded by design — its parser is text-permissive
+    (single-column fallback) and intentionally has no "malformed" failure
+    mode. See the ``_MODE_4_TOOLS`` comment above for the rationale.
+    """
+    _exercise_read_tool_degrade(
+        provider=initialized_provider,
+        tool_name=tool_name,
+        stub=_stub_run_malformed,
+        expected_payload=expected_payload,
+        mode_id="mode4_malformed",
+        monkeypatch=monkeypatch,
+        caplog=caplog,
+    )
+
+
+def test_mode3_timeout_in_prefetch_caches_empty(
+    initialized_provider: IcmMemoryProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mode 3 (timeout) on the ``prefetch`` path — empty string returned, ``[]`` cached.
+
+    Per architecture §8 failure variant: prefetch must (a) return ``""``,
+    (b) write ``[]`` into the cache so ``system_prompt_block`` does not retry,
+    (c) log WARNING. Closes Edge#8 — modes 2/3/4 were previously only tested
+    on the LLM-tool path; this proves the same degrade contract on the hook
+    path too.
+    """
+    monkeypatch.setattr("hermes_icm_memory.cli_runner.subprocess.run", _stub_run_timeout)
+
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
+        result = initialized_provider.prefetch(query="x")
+
+    assert result == ""
+    # Cache poisoning prevents system_prompt_block from re-attempting.
+    assert initialized_provider._prefetch_cache.get(hash("x")) == []
+    # No second subprocess call from system_prompt_block (NFR-PERF-4 +
+    # architecture §8 failure variant).
+    assert initialized_provider.system_prompt_block() == ""
+
+    warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "hermes_icm_memory.hooks"
+    ]
+    assert warnings, "expected WARNING from hermes_icm_memory.hooks on prefetch failure"
 
 
 # ---------- Mode 5: first-call slow path (no degrade) -----------------------
@@ -251,9 +402,16 @@ def test_mode5_first_call_slow_path_no_degrade(
         r for r in caplog.records
         if r.levelno == logging.DEBUG and r.name == "hermes_icm_memory.cli_runner"
     ]
+    elapsed_records = [
+        getattr(r, "elapsed_ms", None) for r in debug_records
+        if getattr(r, "elapsed_ms", None) is not None
+    ]
+    assert elapsed_records, "expected at least one DEBUG record carrying elapsed_ms extra"
+    # Tightened (Blind#4) — elapsed_ms must be a positive number, not just present.
+    # Catches a regression where the field is wired but always 0/None.
     assert any(
-        getattr(r, "elapsed_ms", None) is not None for r in debug_records
-    ), "expected at least one DEBUG record carrying elapsed_ms extra"
+        isinstance(v, (int, float)) and v > 0 for v in elapsed_records
+    ), f"expected elapsed_ms > 0 on the slow-call DEBUG record; got {elapsed_records!r}"
 
 
 # ---------- Mode 6: worker dies once → lazy respawn (AD-15) -----------------
@@ -320,14 +478,35 @@ def test_mode7_worker_dies_twice_degrades_with_critical(
         initialized_provider.sync_turn(user_content="u", assistant_content="a")
 
     assert initialized_provider._writes_disabled is True
-    assert any(
-        r.levelno == logging.CRITICAL for r in caplog.records
-    ), f"expected CRITICAL log; got levels {[r.levelno for r in caplog.records]!r}"
+    # Tightened (Blind#6) — filter by logger AND assert message-content keyword
+    # so an unrelated CRITICAL doesn't satisfy the assertion.
+    critical_records = [
+        r for r in caplog.records
+        if r.levelno == logging.CRITICAL and r.name == "hermes_icm_memory.hooks"
+        and "second death" in r.message.lower()
+    ]
+    assert critical_records, (
+        f"expected CRITICAL 'second death' log from hermes_icm_memory.hooks; "
+        f"got {[(r.levelname, r.name, r.message) for r in caplog.records]!r}"
+    )
 
-    # Subsequent enqueues are no-ops — respawn count stays put, no exception.
+    # Subsequent enqueues are no-ops — respawn count + writes_disabled stay put,
+    # no new task is enqueued, no exception escapes (Blind#14 + Edge#3).
     pre_count = initialized_provider._respawn_count
+    queue_obj = initialized_provider._write_queue
+    pre_qsize = queue_obj.qsize() if queue_obj is not None else 0
+
     initialized_provider.sync_turn(user_content="u", assistant_content="a")
+
     assert initialized_provider._respawn_count == pre_count
+    assert initialized_provider._writes_disabled is True, (
+        "writes_disabled must stay True on subsequent sync_turn (sticky degrade)"
+    )
+    post_qsize = queue_obj.qsize() if queue_obj is not None else 0
+    assert post_qsize == pre_qsize, (
+        f"sync_turn must not enqueue when writes_disabled=True; "
+        f"qsize {pre_qsize} → {post_qsize}"
+    )
 
 
 # ---------- Mode 8: hermes_home parent unwritable ---------------------------
@@ -363,6 +542,48 @@ def test_mode8_hermes_home_unwritable_self_disables(
     ), f"expected hermes_home WARNING; got {[(r.levelname, r.message) for r in caplog.records]!r}"
 
 
+def test_mode8_self_disable_is_sticky_across_reinit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hermes_home: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mode 8 follow-up — ``_available=False`` survives a successful re-init (Edge#5).
+
+    Once ``initialize`` self-disables (because ``mkdir_parent`` raised), a
+    later re-init with DIFFERENT args must not re-enable the provider — the
+    sticky-False guarantee in ``provider.py::is_available`` is a load-bearing
+    contract for downstream tools (recall/topics/health/prefetch all check
+    ``is_available()`` and would silently start hitting subprocess again if
+    the flag flipped back).
+    """
+    fail_count = {"n": 0}
+
+    def _raise_perm_once(_db_path: Path) -> None:
+        fail_count["n"] += 1
+        if fail_count["n"] == 1:
+            raise PermissionError("read-only filesystem")
+        # Subsequent calls "succeed" — proves stickiness even when the
+        # underlying error condition has cleared.
+
+    monkeypatch.setattr("hermes_icm_memory.config.mkdir_parent", _raise_perm_once)
+
+    provider = IcmMemoryProvider()
+
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.provider"):
+        provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
+    assert provider.is_available() is False
+
+    # Re-init with different args: mkdir_parent succeeds this time, but the
+    # sticky-False on ``_available`` must be preserved.
+    provider.initialize(
+        session_id="s2", hermes_home=tmp_hermes_home, profile="other"
+    )
+    assert provider.is_available() is False, (
+        "re-init with different args must not flip _available back to True; "
+        "sticky-False is a load-bearing contract"
+    )
+
+
 # ---------- AC2: stress sub-test --------------------------------------------
 
 
@@ -391,14 +612,19 @@ def test_stress_subprocess_failure_no_escape_under_burst(
     monkeypatch.setattr("hermes_icm_memory.cli_runner.subprocess.run", stub)
 
     iterations = 100
-    with caplog.at_level(logging.WARNING):
+    # Filter by logger (Blind#8) so an unrelated WARNING from another
+    # subsystem doesn't inflate the count and break the strict equality.
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.tools"):
         for _ in range(iterations):
             out = initialized_provider.handle_tool_call("icm_recall", {"query": "x"})
             parsed = json.loads(out)
             assert parsed == {"hits": []}, f"{mode_id}: degraded shape regression"
 
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "hermes_icm_memory.tools"
+    ]
     assert len(warnings) == iterations, (
-        f"{mode_id}: expected {iterations} WARNINGs (one per call, NOT rate-limited "
-        f"at the tool boundary); got {len(warnings)}"
+        f"{mode_id}: expected {iterations} WARNINGs from hermes_icm_memory.tools "
+        f"(one per call, NOT rate-limited at the tool boundary); got {len(warnings)}"
     )
