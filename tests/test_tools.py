@@ -315,7 +315,7 @@ def test_topics_returns_topics_key(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_topics_failure_returns_empty_topics(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC9 — ICMError → {"topics": []} + one WARNING."""
+    """AC9 — ICMError → {"topics": []} + exactly one WARNING."""
 
     def _raise(*args: Any, **kwargs: Any) -> Any:
         raise ICMNonZeroExitError("non-zero")
@@ -328,7 +328,11 @@ def test_topics_failure_returns_empty_topics(
 
     assert isinstance(result, str)
     assert json.loads(result) == {"topics": []}
-    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, (
+        f"expected exactly one WARNING, got {len(warnings)}: "
+        f"{[r.getMessage() for r in warnings]!r}"
+    )
 
 
 # =============================================================================
@@ -387,7 +391,7 @@ def test_health_with_topic_arg(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_health_failure_returns_empty_report(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC12 — ICMError → {"report": {}} + one WARNING."""
+    """AC12 — ICMError → {"report": {}} + exactly one WARNING."""
 
     def _raise(*args: Any, **kwargs: Any) -> Any:
         raise ICMTimeoutError("read timeout")
@@ -400,7 +404,11 @@ def test_health_failure_returns_empty_report(
 
     assert isinstance(result, str)
     assert json.loads(result) == {"report": {}}
-    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, (
+        f"expected exactly one WARNING, got {len(warnings)}: "
+        f"{[r.getMessage() for r in warnings]!r}"
+    )
 
 
 # =============================================================================
@@ -614,6 +622,180 @@ def test_read_handlers_degrade_when_provider_not_initialized(
     assert any(
         "not initialized" in record.getMessage() for record in caplog.records
     )
+
+
+# =============================================================================
+# Phase 3 review follow-ups — close gaps surfaced by Auditor + Edge Case Hunter
+# =============================================================================
+
+
+def test_store_uses_config_default_importance() -> None:
+    """AC6 (config-default branch) — `_config["default_importance"]` wins over fallback.
+
+    Auditor partial-coverage finding: AC6 mandates the config-supplied default
+    branch, but the original suite only tested the explicit-arg path and the
+    pure-default path. This pins the middle branch.
+    """
+    provider = _provider_with_queue()
+    provider._config["default_importance"] = "medium"
+    provider.handle_tool_call("icm_store", {"topic": "p", "content": "c"})
+    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
+    assert task[1] == "medium"
+
+
+def test_store_with_non_dict_config_falls_back_to_default_importance() -> None:
+    """`_config` rebound to non-dict → `_importance_for` skips the cfg branch.
+
+    Pins the `isinstance(cfg, dict) is False` branch in `_importance_for`
+    so a corrupt provider state still produces a documented task tuple
+    rather than raising.
+    """
+    provider = _provider_with_queue()
+    provider._config = None  # type: ignore[assignment] — pathological
+    provider.handle_tool_call("icm_store", {"topic": "p", "content": "c"})
+    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
+    assert task[1] == "high"
+
+
+def test_store_invalid_config_default_importance_falls_back() -> None:
+    """Garbage `_config["default_importance"]` → coerced to fallback default.
+
+    Defensive: a stale or hand-edited sidecar might set
+    `default_importance="urgent"` outside the validated enum. The handler
+    must not propagate that bogus value to the worker.
+    """
+    provider = _provider_with_queue()
+    provider._config["default_importance"] = "URGENT"  # not in enum
+    provider.handle_tool_call("icm_store", {"topic": "p", "content": "c"})
+    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
+    assert task[1] == "high"  # ultimate fallback
+
+
+def test_store_invalid_importance_falls_back_to_default() -> None:
+    """Bogus importance value → coerced to default rather than passed to worker.
+
+    Closes Phase 3 Edge Case Hunter F3: schema declares an enum, handler must
+    enforce it. Otherwise a typo (`"urgent"`) silently reaches `icm store -i
+    urgent` and fails on the worker, after the agent already saw `accepted=True`.
+    """
+    provider = _provider_with_queue()
+    provider.handle_tool_call(
+        "icm_store",
+        {"topic": "p", "content": "c", "importance": "URGENT"},
+    )
+    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
+    assert task[1] == "high"  # default fallback, not "URGENT"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_payload"),
+    [
+        ("icm_recall", {"hits": []}),
+        ("icm_topics", {"topics": []}),
+        ("icm_health", {"report": {}}),
+    ],
+)
+def test_read_handlers_degrade_on_untyped_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    name: str,
+    expected_payload: dict[str, Any],
+) -> None:
+    """Untyped exception from cli_runner → per-tool degrade shape, not generic crash.
+
+    Closes Phase 3 Edge Case Hunter F7/F8: only catching `ICMError` lets
+    `OSError` / `MemoryError` / `UnicodeError` fall through to the outer net,
+    which returned the generic `{"error": "tool handler crashed"}` instead of
+    the documented `{"hits": []}` / `{"topics": []}` / `{"report": {}}`.
+    """
+
+    def _untyped_boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("untyped runtime explosion")
+
+    monkeypatch.setattr(tools, "run_recall", _untyped_boom)
+    monkeypatch.setattr(tools, "run_topics", _untyped_boom)
+    monkeypatch.setattr(tools, "run_health", _untyped_boom)
+
+    provider = _read_provider()
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.tools"):
+        result = provider.handle_tool_call(name, {"query": "x"})
+
+    assert json.loads(result) == expected_payload
+
+
+@pytest.mark.parametrize("bad_args", [None, "garbage", 12345, [1, 2, 3], 0.5])
+def test_handle_tool_call_coerces_non_dict_args(bad_args: Any) -> None:
+    """`args` coerced to {} when not a dict; per-tool degrade shape still wins.
+
+    Closes Phase 3 Edge Case Hunter F11: the truthiness coercion `args or {}`
+    let truthy non-dict values through (e.g. `"foo" or {}` → `"foo"`), then
+    `args.get("query")` raised `AttributeError`, surfacing as the generic
+    crash JSON instead of the documented recall-degrade.
+    """
+    provider = _read_provider()
+    result = provider.handle_tool_call("icm_recall", bad_args)
+    # Non-dict args means no `query` → recall validation degrades to {hits: []}
+    assert isinstance(result, str)
+    assert json.loads(result) == {"hits": []}
+
+
+def test_dispatch_outer_net_catches_handler_bugs(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If a future handler ever forgets its inner try/except, the outer net traps it.
+
+    Defense-in-depth for AD-07 / NFR-REL-1: even when a handler raises an
+    untyped exception (a regression bug, not a documented failure mode), the
+    dispatch returns a documented error JSON rather than letting the exception
+    escape into Hermes's turn loop.
+    """
+
+    def _bug(provider: Any, args: Any) -> str:
+        raise RuntimeError("regression: handler forgot its try/except")
+
+    monkeypatch.setitem(tools._DISPATCH, "icm_recall", _bug)
+
+    provider = _read_provider()
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.tools"):
+        result = provider.handle_tool_call("icm_recall", {"query": "x"})
+
+    payload = json.loads(result)
+    assert "error" in payload
+    assert "tool handler crashed" in payload["error"]
+    assert any("tool handler crashed" in r.getMessage() for r in caplog.records)
+
+
+def test_corrupt_config_does_not_crash_read_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_config` rebound to non-dict → read handlers still degrade documented shape.
+
+    Closes Phase 3 Edge Case Hunter F5/F6: `_read_timeout_ms` (and the limit
+    helper) used to call `.get(...)` directly, raising `AttributeError` which
+    the outer net converted into the generic crash JSON instead of the
+    per-tool degrade shape.
+    """
+    captured: dict[str, Any] = {}
+
+    def _fake_run_recall(
+        query: str,
+        limit: int,
+        db_path: Any,
+        timeout_ms: int,
+        topic: str | None = None,
+        project: str | None = None,
+    ) -> list[dict[str, Any]]:
+        captured["timeout_ms"] = timeout_ms
+        return []
+
+    monkeypatch.setattr(tools, "run_recall", _fake_run_recall)
+
+    provider = _read_provider()
+    provider._config = None  # type: ignore[assignment] — pathological
+    result = provider.handle_tool_call("icm_recall", {"query": "x"})
+    # No crash; documented degrade shape; default timeout used.
+    assert json.loads(result) == {"hits": []}
+    assert captured["timeout_ms"] == 2000  # _DEFAULT_READ_TIMEOUT_MS
 
 
 def test_no_tool_raises(monkeypatch: pytest.MonkeyPatch) -> None:
