@@ -172,14 +172,23 @@ def test_modes_2_3_4_subprocess_failure_degrades_prefetch(
     assert warnings, (
         f"{mode_id}: expected WARNING from hermes_icm_memory.hooks logger"
     )
-    # AC8: exception text inlined into the format string itself, not just
-    # buried in ``extra={...}``. Ensures the default Python formatter
-    # surfaces the cause — the v0.2-era code dropped this and made the
-    # 2026-05-06 Pi outage undebuggable.
-    assert any(
-        "recall failed" in r.message or "unexpected" in r.message
-        for r in warnings
-    ), f"{mode_id}: WARNING did not name the failure: {[r.message for r in warnings]!r}"
+    # AC8: exception text inlined into the format string itself (via ``%r``),
+    # not just buried in ``extra={...}``. ``LogRecord.getMessage()`` performs
+    # the %-substitution, so the rendered text contains the exception class
+    # name. Validates the default-formatter-readable message — the v0.2-era
+    # code dropped this and made the 2026-05-06 Pi outage undebuggable.
+    rendered = [r.getMessage() for r in warnings]
+    expected_exc_classes = {
+        "mode2_nonzero": "ICMNonZeroExitError",
+        "mode3_timeout": "ICMTimeoutError",
+        "mode4_malformed": "ICMMalformedOutputError",
+    }
+    needle = expected_exc_classes[mode_id]
+    assert any(needle in msg for msg in rendered), (
+        f"{mode_id}: rendered WARNING did not include exception class "
+        f"{needle!r} (default-formatter-readable inline %r is missing); "
+        f"rendered={rendered!r}"
+    )
 
 
 # ---------- Mode 5: first-call slow path (no degrade) -----------------------

@@ -372,17 +372,8 @@ class IcmMemoryProvider:
         Defined explicitly so hermes-agent's memory_manager doesn't log
         ``'IcmMemoryProvider' object has no attribute 'shutdown'`` at gateway
         restart. The v0.2 ``icm serve`` daemon previously torn down here is
-        owned by hermes-native ``mcp_servers.icm:`` in v0.3 (AD-19).
-
-        Catches any unexpected exception at the boundary so a teardown bug
-        can't escalate to a gateway-shutdown failure (AD-07).
+        owned by hermes-native ``mcp_servers.icm:`` in v0.3 (AD-21). If a
+        future revision adds teardown side-effects, wrap them in the AD-07
+        catch-and-degrade pattern (see :meth:`on_session_end` for the shape).
         """
-        try:
-            return None
-        except Exception as exc:  # pragma: no cover — defensive boundary
-            logger.warning(
-                "shutdown: outer boundary caught: %r",
-                exc,
-                extra={"err": repr(exc)},
-            )
-            return None
+        return None
