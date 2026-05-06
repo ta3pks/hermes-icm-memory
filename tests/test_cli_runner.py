@@ -47,9 +47,10 @@ def _ok(stdout: str = "[]", stderr: str = "", returncode: int = 0) -> MagicMock:
 def test_run_recall_argv_shape_default() -> None:
     """argv has the locked default shape when topic and project are None.
 
-    v0.1.1: ``use_embeddings`` defaults to ``False`` so ``--no-embeddings`` is
-    appended to keep Pi-class hot-path recalls instant (model load is otherwise
-    ~50 s per subprocess).
+    v0.1.1: ``use_embeddings`` defaults to ``True`` (the Brief's semantic-recall
+    value prop), so ``--no-embeddings`` is **not** appended by default. Pi-class
+    operators opt out via the config key, which threads a ``use_embeddings=False``
+    kwarg here and re-adds the flag.
     """
     with patch(RUN_TARGET, return_value=_ok("[]")) as run:
         cli_runner.run_recall(query="hello", limit=5, db_path=DB, timeout_ms=2000)
@@ -64,7 +65,6 @@ def test_run_recall_argv_shape_default() -> None:
         "5",
         "--format",
         "json",
-        "--no-embeddings",
     ]
 
 
@@ -83,12 +83,11 @@ def test_run_recall_argv_shape_with_topic_and_project() -> None:
     assert argv[-4:] == ["-t", "errors-resolved", "-p", "hermes-icm-memory"]
 
 
-def test_run_recall_argv_with_use_embeddings_true_omits_flag() -> None:
-    """v0.1.1 — ``use_embeddings=True`` removes the ``--no-embeddings`` flag.
+def test_run_recall_argv_with_use_embeddings_false_appends_flag() -> None:
+    """v0.1.1 — ``use_embeddings=False`` appends ``--no-embeddings``.
 
-    Lets the user opt back into icm's configured embedding model when they're
-    on hardware that can sustain the load (or once v0.2's ``icm-serve`` MCP
-    transport amortizes the model warm-up).
+    The Pi-class escape hatch: keyword-only recall when the embedding-model
+    cold start would blow past ``command_timeout_read_ms``.
     """
     with patch(RUN_TARGET, return_value=_ok("[]")) as run:
         cli_runner.run_recall(
@@ -96,10 +95,11 @@ def test_run_recall_argv_with_use_embeddings_true_omits_flag() -> None:
             limit=5,
             db_path=DB,
             timeout_ms=2000,
-            use_embeddings=True,
+            use_embeddings=False,
         )
     argv = run.call_args.args[0]
-    assert "--no-embeddings" not in argv
+    assert "--no-embeddings" in argv
+    # Flag appears after the locked --format json pair, before any topic/project args.
     assert argv == [
         "icm",
         "--db",
@@ -110,6 +110,7 @@ def test_run_recall_argv_with_use_embeddings_true_omits_flag() -> None:
         "5",
         "--format",
         "json",
+        "--no-embeddings",
     ]
 
 

@@ -140,15 +140,16 @@ _SCHEMA_ENTRIES: Final[list[dict[str, Any]]] = [
     {
         "key": "use_embeddings",
         "type": "bool",
-        "default": False,
+        "default": True,
         "secret": False,
         "required": False,
         "description": (
-            "If true, icm recall uses semantic search (multilingual-e5-base ONNX "
-            "model). On Pi-class hardware this costs ~50s per subprocess call (model "
-            "loads from scratch every invocation), so default is false (keyword-only, "
-            "instant). v0.2 will introduce an icm-serve MCP transport that amortizes "
-            "the model load and allows true=default to be safe everywhere."
+            "If true (default), icm recall uses semantic search via the "
+            "multilingual-e5-base ONNX model — the Brief's value prop. "
+            "On Pi-class hardware the model loads ~50s per subprocess call "
+            "(no daemon to amortize), so Pi users should set this to false "
+            "until v0.2's MCP transport (icm serve) lands. Desktop / cloud "
+            "hosts are fine with the default."
         ),
     },
 ]

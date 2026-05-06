@@ -187,11 +187,15 @@ def test_isolated_default_is_false() -> None:
     assert schema["isolated"]["default"] is False
 
 
-def test_use_embeddings_default_is_false() -> None:
-    """v0.1.1 — ``use_embeddings`` defaults to False (Pi-safe keyword-only path)."""
+def test_use_embeddings_default_is_true() -> None:
+    """v0.1.1 — ``use_embeddings`` defaults to True (Brief's semantic-recall value prop).
+
+    Pi-class operators opt out via ``use_embeddings: false`` in their hermes
+    config. The schema default favours desktop / cloud hosts (the majority).
+    """
     schema = {entry["key"]: entry for entry in config.get_default_schema()}
     assert schema["use_embeddings"]["type"] == "bool"
-    assert schema["use_embeddings"]["default"] is False
+    assert schema["use_embeddings"]["default"] is True
 
 
 def test_validate_accepts_isolated_true_and_false() -> None:

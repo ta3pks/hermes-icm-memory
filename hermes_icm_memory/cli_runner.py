@@ -130,7 +130,7 @@ def run_recall(
     db_path: Path | None,
     timeout_ms: int,
     *,
-    use_embeddings: bool = False,
+    use_embeddings: bool = True,
     topic: str | None = None,
     project: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -138,13 +138,14 @@ def run_recall(
 
     ``use_embeddings`` controls whether ``--no-embeddings`` is appended to argv:
 
-    * ``False`` (default, v0.1.1) — appends ``--no-embeddings``. Keeps the hot
-      path responsive on Pi-class hardware where the multilingual-e5-base ONNX
+    * ``True`` (default, v0.1.1) — omits the flag so ``icm`` uses its configured
+      embedding model and runs full semantic search. This is the Brief's value
+      prop and the right behaviour for desktop / cloud hosts.
+    * ``False`` — appends ``--no-embeddings`` for keyword-only recall. The
+      escape hatch for Pi-class hardware where the multilingual-e5-base ONNX
       model load costs ~50s per subprocess invocation (model loads from scratch
       every call; the OS page cache helps but doesn't amortize ONNX init).
-    * ``True`` — omits the flag so ``icm`` uses its configured embedding model
-      and runs full semantic search. Safe wherever the model load is amortized
-      (powerful hardware, or once v0.2's ``icm-serve`` MCP transport ships).
+      v0.2's ``icm-serve`` MCP transport will retire the need for this flag.
     """
     argv: list[str] = [
         "icm",

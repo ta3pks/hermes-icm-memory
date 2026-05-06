@@ -27,16 +27,16 @@ Manager hot-patched the deployed copy at `~/.hermes/plugins/hermes-icm-memory/` 
 - **Then** the returned list contains exactly **twelve** entries (the original ten plus two new keys), each carrying the standard `key/type/default/secret/required/description` fields.
 - The two new keys are:
   - `isolated` (`bool`, default `False`) — when `True`, plugin uses `<hermes_home>/icm/<profile>.db`; when `False`, plugin omits `--db` so `icm` resolves its OS-canonical default (shared with editors).
-  - `use_embeddings` (`bool`, default `False`) — when `True`, `icm recall` runs with semantic search; when `False`, plugin appends `--no-embeddings` so recall is keyword-only and instant.
-- Defaults are chosen for the brief + Pi: shared DB, no embeddings.
+  - `use_embeddings` (`bool`, default `True`) — when `True`, `icm recall` runs with semantic search (Brief's value prop); when `False`, plugin appends `--no-embeddings` so recall is keyword-only and instant. Pi-class operators opt out via the config.
+- Defaults: shared DB (Brief value prop) + semantic recall (Brief value prop). Pi-class users opt out of embeddings via `use_embeddings: false`.
 
 ### AC2 — `cli_runner.run_recall` accepts `use_embeddings` kwarg
 
-- **Given** `cli_runner.run_recall(query, limit, db_path, timeout_ms, *, use_embeddings: bool = False, topic=None, project=None)`
-- **When** `use_embeddings=False` (default)
-- **Then** `--no-embeddings` is appended to argv.
-- **And when** `use_embeddings=True`
+- **Given** `cli_runner.run_recall(query, limit, db_path, timeout_ms, *, use_embeddings: bool = True, topic=None, project=None)`
+- **When** `use_embeddings=True` (default — Brief's semantic-recall value prop)
 - **Then** argv contains no `--no-embeddings` flag (icm uses its configured embedding model).
+- **And when** `use_embeddings=False` (Pi-class opt-out)
+- **Then** `--no-embeddings` is appended to argv.
 - The hot-patch hardcode of `--no-embeddings` is removed; behavior is now config-driven.
 - `run_topics` / `run_health` argv shape is unchanged — `--no-embeddings` is recall-only on icm 0.10.43.
 
@@ -90,6 +90,7 @@ Manager hot-patched the deployed copy at `~/.hermes/plugins/hermes-icm-memory/` 
 ### AC9 — `test_default_schema_has_twelve_keys`
 
 - `tests/test_config.py::test_default_schema_has_ten_keys` is renamed to `test_default_schema_has_twelve_keys` (or made count-agnostic) with the new key set documented.
+- `test_isolated_default_is_false` and `test_use_embeddings_default_is_true` pin the corrected schema defaults.
 - New validation tests exercise both bool keys (`isolated`, `use_embeddings`) — coercion from `"true"/"false"`, rejection of arbitrary strings, rejection of non-bool/non-string values.
 
 ### AC10 — Version bump + CHANGELOG + README

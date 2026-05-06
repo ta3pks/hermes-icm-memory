@@ -693,7 +693,8 @@ def test_provider_prefetch_default_shared_passes_db_none(
     The legacy ``or self._db_path is None`` short-circuit on ``provider.prefetch``
     has been removed: ``None`` is now the legitimate "use icm canonical default"
     sentinel. Verifies the path flows through to ``cli_runner.run_recall`` with
-    ``db_path=None`` *and* ``use_embeddings=False`` (the v0.1.1 Pi-safe default).
+    ``db_path=None`` *and* ``use_embeddings=True`` (the schema default — Brief's
+    semantic-recall value prop).
     """
     captured: dict[str, Any] = {}
 
@@ -702,7 +703,7 @@ def test_provider_prefetch_default_shared_passes_db_none(
         limit: int,
         db_path: Path | None,
         timeout_ms: int,
-        use_embeddings: bool = False,
+        use_embeddings: bool = True,
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -722,14 +723,14 @@ def test_provider_prefetch_default_shared_passes_db_none(
     block = provider.prefetch(query="dual-write policy")
     assert "shared hit" in block
     assert captured["db_path"] is None
-    assert captured["use_embeddings"] is False
+    assert captured["use_embeddings"] is True
 
 
-def test_provider_prefetch_use_embeddings_flag_threads_through(
+def test_provider_prefetch_use_embeddings_opt_out_threads_through(
     monkeypatch: pytest.MonkeyPatch,
     initialized_provider: IcmMemoryProvider,
 ) -> None:
-    """v0.1.1 — ``use_embeddings=True`` flag flows from provider config to cli_runner."""
+    """v0.1.1 — Pi-class ``use_embeddings=False`` opt-out flows to cli_runner."""
     captured: dict[str, Any] = {}
 
     def fake_run_recall(
@@ -737,7 +738,7 @@ def test_provider_prefetch_use_embeddings_flag_threads_through(
         limit: int,
         db_path: Path | None,
         timeout_ms: int,
-        use_embeddings: bool = False,
+        use_embeddings: bool = True,
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -745,6 +746,6 @@ def test_provider_prefetch_use_embeddings_flag_threads_through(
         return []
 
     monkeypatch.setattr(cli_runner, "run_recall", fake_run_recall)
-    initialized_provider._config["use_embeddings"] = True
+    initialized_provider._config["use_embeddings"] = False
     initialized_provider.prefetch(query="x")
-    assert captured["use_embeddings"] is True
+    assert captured["use_embeddings"] is False

@@ -742,7 +742,12 @@ def test_read_handlers_proceed_when_initialized_default_shared(
 def test_recall_threads_use_embeddings_from_provider_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """v0.1.1 — provider config ``use_embeddings`` flows to ``cli_runner.run_recall``."""
+    """v0.1.1 — provider config ``use_embeddings`` flows to ``cli_runner.run_recall``.
+
+    Schema default is ``True`` (Brief's semantic-recall value prop). Pi-class
+    operators opt out via ``use_embeddings: false`` in their hermes config;
+    the test pins both directions.
+    """
     captured: dict[str, Any] = {}
 
     def _fake_run_recall(
@@ -750,7 +755,7 @@ def test_recall_threads_use_embeddings_from_provider_config(
         limit: int,
         db_path: Any,
         timeout_ms: int,
-        use_embeddings: bool = False,
+        use_embeddings: bool = True,
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -759,15 +764,15 @@ def test_recall_threads_use_embeddings_from_provider_config(
 
     monkeypatch.setattr(tools, "run_recall", _fake_run_recall)
 
-    # Default config → False.
+    # Default (no key set on _config) → True (matches schema default).
     provider = _read_provider()
     provider.handle_tool_call("icm_recall", {"query": "x"})
-    assert captured["use_embeddings"] is False
-
-    # Opt-in → True.
-    provider._config["use_embeddings"] = True
-    provider.handle_tool_call("icm_recall", {"query": "x"})
     assert captured["use_embeddings"] is True
+
+    # Pi-class opt-out → False.
+    provider._config["use_embeddings"] = False
+    provider.handle_tool_call("icm_recall", {"query": "x"})
+    assert captured["use_embeddings"] is False
 
 
 # =============================================================================

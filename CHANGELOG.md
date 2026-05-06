@@ -18,24 +18,29 @@ value prop.
   OS-canonical default DB — the same SQLite file Claude Code, Cursor,
   OpenCode, Codex CLI, etc. already share. Recovers the original brief's
   promise: "Shared memory with editors, not a parallel silo."
-- **`icm recall` defaults to keyword-only.** `cli_runner.run_recall` now
-  appends `--no-embeddings` unless `use_embeddings=true` is set in provider
-  config. Motivation: on Pi-class hardware (4 GB Raspberry Pi 4) the
-  multilingual-e5-base ONNX model loads from scratch on every subprocess
-  invocation, costing ~50 s per call — past the default 2000 ms read
-  timeout. Keyword-only recall is instant and "good enough" until v0.2's
-  `icm-serve` MCP transport amortizes the model load.
+- **`icm recall` runs semantic search by default; Pi users opt out.**
+  The new `use_embeddings` config key defaults to `true` (the Brief's
+  value prop — semantic recall via the multilingual-e5-base ONNX model).
+  Set to `false` to fall back to keyword-only recall. The Pi 4 deploy
+  surfaced the trade-off: the ONNX model loads from scratch on every
+  subprocess invocation (~50 s on a 4 GB Pi 4), which blows past the
+  default 2000 ms read timeout. Pi-class operators should set
+  `use_embeddings: false` in their hermes config until v0.2's
+  `icm-serve` MCP transport amortizes the model load. Desktop / cloud
+  hosts are fine with the default.
 
 ### Added
 
 - New config key `isolated` (bool, default `false`). Set to `true` to
   restore the v0.1.0 silo behaviour (`<hermes_home>/icm/<profile>.db`
   per-profile DB path, `--db` forwarded, profile isolation enforced).
-- New config key `use_embeddings` (bool, default `false`). Set to `true`
-  to opt back into semantic search; on slow hardware combine with a
-  generously raised `command_timeout_read_ms`.
-- `cli_runner.run_recall` accepts `use_embeddings: bool = False` kwarg
-  (keyword-only) and conditionally appends `--no-embeddings` accordingly.
+- New config key `use_embeddings` (bool, default `true`). Set to `false`
+  on Pi-class hardware (or any host that can't sustain the ONNX cold
+  start inside `command_timeout_read_ms`) to fall back to keyword-only
+  recall.
+- `cli_runner.run_recall` accepts `use_embeddings: bool = True` kwarg
+  (keyword-only) and conditionally appends `--no-embeddings` when
+  ``False``.
 - Default-shared mode flows `db_path=None` end-to-end: `cli_runner` omits
   `--db`, `hooks.run_prefetch` and `hooks.worker_loop` accept
   `Path | None`, and `tools._run_read` passes the same `None` through to
@@ -71,19 +76,23 @@ value prop.
 
 If you relied on the v0.1.0 default behaviour (per-profile parallel silo
 under `<hermes_home>/icm/<profile>.db`), set `isolated: true` in your
-Hermes memory-provider config to restore it. The two-key migration is:
+Hermes memory-provider config to restore it:
 
 ```yaml
-# Restores v0.1.0 behaviour
+# Restores v0.1.0 silo behaviour
 isolated: true
-use_embeddings: true   # Optional — only flip if your hardware can sustain
-                       # ONNX model load inside command_timeout_read_ms.
 ```
 
-If you were running on Pi-class hardware and saw empty recalls in v0.1.0,
-upgrading to v0.1.1 (with the defaults) will fix that automatically: the
-plugin now uses the canonical shared DB and skips the embedding-model cold
-start.
+If you're on Pi-class hardware (4 GB Raspberry Pi 4 or similar where the
+ONNX model load blows past `command_timeout_read_ms`), additionally set:
+
+```yaml
+# Pi-class escape hatch — keyword-only recall
+use_embeddings: false
+```
+
+Desktop / cloud hosts are fine with the default `use_embeddings: true`
+and gain the Brief's semantic-recall value prop out of the box.
 
 ## [0.1.0] — 2026-05-05
 

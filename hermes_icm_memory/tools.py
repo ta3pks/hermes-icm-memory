@@ -172,13 +172,15 @@ def _read_timeout_ms(provider: IcmMemoryProvider) -> int:
 
 
 def _use_embeddings(provider: IcmMemoryProvider) -> bool:
-    """Resolve the ``use_embeddings`` flag from provider config (default ``False``).
+    """Resolve the ``use_embeddings`` flag from provider config (default ``True``).
 
-    v0.1.1: ``False`` keeps the hot path Pi-safe; opt-in via provider config.
-    Non-bool values (e.g. from a corrupt sidecar) silently fall back to ``False``.
+    v0.1.1: matches the schema default — semantic recall is the Brief's value
+    prop and is safe on desktop / cloud hardware. Pi-class operators opt out
+    via ``use_embeddings: false`` in their hermes config. Non-bool / missing
+    values silently fall back to ``True`` (the schema default).
     """
-    raw = _provider_config(provider).get("use_embeddings", False)
-    return raw if isinstance(raw, bool) else False
+    raw = _provider_config(provider).get("use_embeddings", True)
+    return raw if isinstance(raw, bool) else True
 
 
 def _recall_limit(provider: IcmMemoryProvider, override: object) -> int:
