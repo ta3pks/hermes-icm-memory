@@ -16,37 +16,14 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from hermes_icm_memory import cli_runner
 from hermes_icm_memory.provider import IcmMemoryProvider
 
 pytestmark = pytest.mark.skipif(
     shutil.which("icm") is None, reason="icm not on PATH"
 )
-
-
-@pytest.fixture
-def no_embeddings_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inject ``--no-embeddings`` into every ``cli_runner._run`` invocation.
-
-    The real ``icm`` CLI loads its embeddings model lazily on first
-    embedding-using call; CI hosts do not have it cached and would either
-    download or OOM. ``--no-embeddings`` is a top-level flag accepted by
-    every subcommand we exercise, and turns ICM into pure keyword search —
-    sufficient for the recall assertions.
-    """
-    real_run = cli_runner._run
-
-    def patched(argv: list[str], timeout_ms: int) -> Any:
-        new_argv = list(argv)
-        if new_argv and new_argv[0] == "icm" and "--no-embeddings" not in new_argv:
-            new_argv.insert(1, "--no-embeddings")
-        return real_run(new_argv, timeout_ms)
-
-    monkeypatch.setattr(cli_runner, "_run", patched)
 
 
 def _drain_and_join(provider: IcmMemoryProvider) -> None:

@@ -20,7 +20,6 @@ import logging
 import shutil
 import threading
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -33,20 +32,6 @@ pytestmark = pytest.mark.skipif(
 
 _QUEUE_CAP = 4
 _BURST_FACTOR = 2  # 2 × capacity per the locked spec
-
-
-@pytest.fixture
-def no_embeddings_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inject ``--no-embeddings`` into every ``cli_runner._run`` invocation."""
-    real_run = cli_runner._run
-
-    def patched(argv: list[str], timeout_ms: int) -> Any:
-        new_argv = list(argv)
-        if new_argv and new_argv[0] == "icm" and "--no-embeddings" not in new_argv:
-            new_argv.insert(1, "--no-embeddings")
-        return real_run(new_argv, timeout_ms)
-
-    monkeypatch.setattr(cli_runner, "_run", patched)
 
 
 def test_overflow_fifo_warning_no_exception(
@@ -85,11 +70,14 @@ def test_overflow_fifo_warning_no_exception(
         # 30 s ceiling guards against test-author errors leaving the gate shut.
         if not drain_gate.wait(timeout=30):
             raise RuntimeError("gate never opened — test bug")
-        processed.append(content)
-        return real_run_store(
+        # Record AFTER the real call returns so a flaky icm subprocess
+        # cannot inflate `accepted` beyond what actually landed in the DB —
+        # assertion (e) `len(hits) == accepted` would otherwise fail spuriously.
+        real_run_store(
             topic, content, importance, db_path, timeout_ms,
             keywords=keywords, raw=raw,
         )
+        processed.append(content)
 
     monkeypatch.setattr(cli_runner, "run_store", gated_run_store)
 

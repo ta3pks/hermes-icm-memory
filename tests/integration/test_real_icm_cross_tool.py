@@ -17,30 +17,15 @@ import json
 import shutil
 import subprocess  # external-write simulation; see module docstring.
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from hermes_icm_memory import cli_runner, config
+from hermes_icm_memory import config
 from hermes_icm_memory.provider import IcmMemoryProvider
 
 pytestmark = pytest.mark.skipif(
     shutil.which("icm") is None, reason="icm not on PATH"
 )
-
-
-@pytest.fixture
-def no_embeddings_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same ``--no-embeddings`` injection as ``test_real_icm_recall``."""
-    real_run = cli_runner._run
-
-    def patched(argv: list[str], timeout_ms: int) -> Any:
-        new_argv = list(argv)
-        if new_argv and new_argv[0] == "icm" and "--no-embeddings" not in new_argv:
-            new_argv.insert(1, "--no-embeddings")
-        return real_run(new_argv, timeout_ms)
-
-    monkeypatch.setattr(cli_runner, "_run", patched)
 
 
 def test_external_write_visible_to_plugin(
