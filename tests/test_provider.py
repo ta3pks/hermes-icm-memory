@@ -202,25 +202,42 @@ def test_save_config_rejects_invalid_returns_error_dict(tmp_hermes_home: Path) -
     assert provider._config == {}
 
 
-# ---------- AC13: handle_tool_call placeholder -------------------------------
+# ---------- AC13: handle_tool_call unknown-name dispatch (S09 wired) --------
 
 
 def test_handle_tool_call_unknown_tool_returns_error_json() -> None:
-    """AC13 — placeholder always returns ``{"error": "tool unavailable"}`` JSON."""
+    """AC13 (post-S09) — unknown tool name → ``{"error": "unknown tool: ..."}`` JSON.
+
+    S07 stub returned ``{"error": "tool unavailable"}`` for every name; S09
+    wired real dispatch. The original AC intent (unknown name → error JSON,
+    no raise) now lives on the dispatch's unknown-name branch in
+    ``hermes_icm_memory.tools``.
+    """
     provider = IcmMemoryProvider()
-    out = provider.handle_tool_call("icm_recall", {"query": "x"})
-    assert out == json.dumps({"error": "tool unavailable"})
-
-    out_other = provider.handle_tool_call("anything-at-all", {})
-    assert out_other == json.dumps({"error": "tool unavailable"})
-
-
-# ---------- AC14: get_tool_schemas stub --------------------------------------
+    out = provider.handle_tool_call("anything-at-all", {})
+    payload = json.loads(out)
+    assert "error" in payload
+    assert "unknown tool" in payload["error"]
+    assert "anything-at-all" in payload["error"]
 
 
-def test_get_tool_schemas_is_empty_list() -> None:
-    """AC14 — ``get_tool_schemas()`` returns ``[]`` until S09."""
-    assert IcmMemoryProvider().get_tool_schemas() == []
+# ---------- AC14: get_tool_schemas dispatch (S09 wired) ----------------------
+
+
+def test_get_tool_schemas_returns_four_schemas() -> None:
+    """AC14 (post-S09) — provider delegates to ``tools.get_tool_schemas``.
+
+    Deeper schema-shape contract lives in ``tests/test_tools.py``; this case
+    only pins that the provider returns four entries with the canonical names.
+    """
+    schemas = IcmMemoryProvider().get_tool_schemas()
+    assert len(schemas) == 4
+    assert [s["name"] for s in schemas] == [
+        "icm_recall",
+        "icm_store",
+        "icm_topics",
+        "icm_health",
+    ]
 
 
 # ---------- Extra coverage: save_config with no hermes_home -----------------

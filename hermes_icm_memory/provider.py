@@ -20,15 +20,11 @@ import threading
 from pathlib import Path
 from typing import Any, Final
 
-from . import config, hooks
+from . import config, hooks, tools
 
 __all__ = ["IcmMemoryProvider"]
 
 logger = logging.getLogger(__name__)
-
-#: Placeholder JSON returned by :meth:`IcmMemoryProvider.handle_tool_call`
-#: until S09 wires real tool handlers.
-_TOOL_UNAVAILABLE_JSON: Final[str] = json.dumps({"error": "tool unavailable"})
 
 #: Filename of the JSON sidecar persisted under ``<hermes_home>/icm/``.
 _CONFIG_SIDECAR_NAME: Final[str] = "config.json"
@@ -168,19 +164,19 @@ class IcmMemoryProvider:
 
         return None
 
-    # ------------------------------------------------------------------ tools (S09 stubs)
+    # ------------------------------------------------------------------ tools
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        """Return the LLM-facing tool schemas. Empty stub until S09."""
-        return []
+        """Return the four LLM-facing tool schemas (delegates to ``tools.py``)."""
+        return tools.get_tool_schemas()
 
-    def handle_tool_call(self, name: str, args: dict[str, Any]) -> str:  # noqa: ARG002
-        """Dispatch an LLM tool call. Always returns a JSON-encoded string.
+    def handle_tool_call(self, name: str, args: dict[str, Any]) -> str:
+        """Dispatch an LLM tool call to ``tools.py``. Always returns a JSON string.
 
-        Stub returns ``{"error": "tool unavailable"}`` for every name; S09
-        replaces the body with a dispatch table into ``tools.py``.
+        Per AD-07 / AD-10 / FR19, ``tools.handle_tool_call`` never raises and
+        always returns a ``json.dumps(...)`` string — never a dict.
         """
-        return _TOOL_UNAVAILABLE_JSON
+        return tools.handle_tool_call(self, name, args)
 
     # ------------------------------------------------------------------ S08 hot-path
     # The four hook methods + worker plumbing live here as thin wrappers around
