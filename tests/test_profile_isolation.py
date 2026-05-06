@@ -78,10 +78,6 @@ def test_two_profiles_one_hermes_home_two_dbs(tmp_path: Path) -> None:
 # ---------- AC3: cross-profile recall does not leak (integration) -------------
 
 
-@pytest.mark.skipif(
-    shutil.which("icm") is None,
-    reason="integration test: requires real `icm` binary on PATH",
-)
 def _icm_recall_hits(db_path: Path, query: str) -> list[dict[str, object]]:
     """Run ``icm recall`` with ``--no-embeddings`` and return the parsed hit list.
 
@@ -118,6 +114,10 @@ def _icm_recall_hits(db_path: Path, query: str) -> list[dict[str, object]]:
     return parsed
 
 
+@pytest.mark.skipif(
+    shutil.which("icm") is None,
+    reason="integration test: requires real `icm` binary on PATH",
+)
 def test_no_cross_profile_recall_leak(tmp_path: Path) -> None:
     """AC3 — write through A's DB, recall through B's DB ⇒ zero hits.
 
