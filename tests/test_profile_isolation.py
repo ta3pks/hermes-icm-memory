@@ -82,12 +82,50 @@ def test_two_profiles_one_hermes_home_two_dbs(tmp_path: Path) -> None:
     shutil.which("icm") is None,
     reason="integration test: requires real `icm` binary on PATH",
 )
+def _icm_recall_hits(db_path: Path, query: str) -> list[dict[str, object]]:
+    """Run ``icm recall`` with ``--no-embeddings`` and return the parsed hit list.
+
+    icm 0.10.43 prints ``"No memories found."`` in plain text on zero hits even
+    under ``--format json``; treat that sentinel as the empty-list shape.
+    """
+    proc = subprocess.run(  # noqa: S603 — argv list, shell=False.
+        [
+            "icm",
+            "--db",
+            str(db_path),
+            "recall",
+            query,
+            "--no-embeddings",
+            "--limit",
+            "5",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert proc.returncode == 0, (
+        f"icm recall against {db_path} failed: rc={proc.returncode}, "
+        f"stderr={proc.stderr!r}"
+    )
+    stdout = proc.stdout.strip()
+    if not stdout or stdout == "No memories found.":
+        return []
+    parsed = json.loads(stdout)
+    assert isinstance(parsed, list), f"icm recall returned non-list JSON: {parsed!r}"
+    return parsed
+
+
 def test_no_cross_profile_recall_leak(tmp_path: Path) -> None:
     """AC3 — write through A's DB, recall through B's DB ⇒ zero hits.
 
     Uses ``--no-embeddings`` so CI does not download the embedding model;
     keyword search is sufficient because the assertion is "zero hits", which
-    is even more easily violated under keyword-only matching.
+    is even more easily violated under keyword-only matching. A positive-control
+    recall against A's own DB asserts ≥ 1 hit so a vacuously passing leak test
+    (e.g. broken store, swallowed query) lights up rather than hides.
     """
     home = tmp_path / "hermes_home"
     home.mkdir()
@@ -129,43 +167,21 @@ def test_no_cross_profile_recall_leak(tmp_path: Path) -> None:
         f"stderr={store_proc.stderr!r}"
     )
 
-    recall_proc = subprocess.run(  # noqa: S603 — argv list, shell=False.
-        [
-            "icm",
-            "--db",
-            str(provider_b._db_path),
-            "recall",
-            token,
-            "--no-embeddings",
-            "--limit",
-            "5",
-            "--format",
-            "json",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
-    assert recall_proc.returncode == 0, (
-        f"icm recall (profile B) failed: rc={recall_proc.returncode}, "
-        f"stderr={recall_proc.stderr!r}"
+    # Positive control: recall against A's own DB must find the memory we just
+    # wrote. If this fails, the test machinery itself is broken (bad argv,
+    # store not committed, ...) and the leak assertion below would be vacuous.
+    own_hits = _icm_recall_hits(provider_a._db_path, token)
+    assert len(own_hits) >= 1, (
+        f"positive control failed: profile A recalled {len(own_hits)} hit(s) for "
+        f"the memory it just wrote (token={token!r}). Test machinery is broken; "
+        f"the cross-profile assertion below would be vacuous."
     )
 
-    # icm 0.10.43 prints "No memories found." in plain text on zero hits, even
-    # under ``--format json``. Treat that sentinel as the empty-list shape.
-    stdout = recall_proc.stdout.strip()
-    if not stdout or stdout == "No memories found.":
-        hits: list[dict[str, object]] = []
-    else:
-        parsed = json.loads(stdout)
-        assert isinstance(parsed, list), (
-            f"icm recall returned non-list JSON: {parsed!r}"
-        )
-        hits = parsed
-    assert hits == [], (
-        f"cross-profile leakage: profile B saw {len(hits)} hit(s) for profile A's "
-        f"token {token!r}; expected 0. hits={hits!r}"
+    # Leak assertion: profile B must see zero hits.
+    leak_hits = _icm_recall_hits(provider_b._db_path, token)
+    assert leak_hits == [], (
+        f"cross-profile leakage: profile B saw {len(leak_hits)} hit(s) for profile A's "
+        f"token {token!r}; expected 0. hits={leak_hits!r}"
     )
 
 
