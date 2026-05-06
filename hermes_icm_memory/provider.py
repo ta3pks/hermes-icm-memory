@@ -1,10 +1,19 @@
 """``IcmMemoryProvider`` — Hermes-side memory provider class.
 
-Implements every Hermes-required lifecycle method on top of
-:mod:`hermes_icm_memory.config`. Architecture invariants:
+v0.3 — lifecycle-only. The provider exposes the four Hermes lifecycle hooks
+(``prefetch``, ``system_prompt_block``, ``sync_turn``, ``on_session_end``)
+plus a ``shutdown()`` no-op so hermes-agent's memory_manager doesn't log
+``'IcmMemoryProvider' object has no attribute 'shutdown'`` at gateway
+restart. The LLM-facing ``icm_memory_*`` tools are exposed by hermes-native
+``mcp_servers.icm:`` config (hermes-agent v0.3.0+) — this provider no
+longer carries an LLM tool surface (AD-19).
+
+Architecture invariants:
 
 * **AD-12** — this module MUST NOT import ``subprocess`` (S11 AST test enforces).
 * **AD-13** — module-level ``logger = logging.getLogger(__name__)``; never root.
+  WARNINGs include the exception text inline via ``%r`` *and* in
+  ``extra={...}`` so default + JSON log formatters both surface it (AC8).
 * **AD-07** — every public method catches at the boundary and returns the
   documented degraded shape. No exception ever propagates into a Hermes turn.
 """
@@ -20,7 +29,7 @@ import threading
 from pathlib import Path
 from typing import Any, Final
 
-from . import cli_runner, config, hooks, tools
+from . import config, hooks
 
 __all__ = ["IcmMemoryProvider"]
 
@@ -75,7 +84,9 @@ class IcmMemoryProvider:
         try:
             self._available = bool(shutil.which("icm"))
         except Exception as exc:  # pragma: no cover — shutil.which is total
-            logger.warning("is_available probe raised", extra={"err": repr(exc)})
+            logger.warning(
+                "is_available probe raised: %r", exc, extra={"err": repr(exc)}
+            )
             self._available = False
         return self._available
 
@@ -117,7 +128,9 @@ class IcmMemoryProvider:
                 config.mkdir_parent(db_path)
             except OSError as exc:
                 logger.warning(
-                    "initialize failed: hermes_home not writable; provider self-disabling",
+                    "initialize failed: hermes_home not writable; "
+                    "provider self-disabling: %r",
+                    exc,
                     extra={"hermes_home": str(hermes_home), "err": repr(exc)},
                 )
                 self._available = False
@@ -129,22 +142,6 @@ class IcmMemoryProvider:
 
         self._session_id = session_id
         self._init_args = args_key
-
-        # v0.2: when transport=mcp, lazy-spawn ``icm serve``. Failure flips the
-        # transport back to ``cli`` for the rest of the lifetime so the read
-        # path keeps working (degrade-to-cli, not degrade-to-empty).
-        if self._config_str("transport") == "mcp":
-            try:
-                cli_runner.mcp_start(
-                    db_path=self._db_path,
-                    use_embeddings=self._config_bool("use_embeddings"),
-                )
-            except Exception as exc:  # noqa: BLE001 — every failure degrades
-                logger.warning(
-                    "initialize: mcp_start failed; falling back to transport=cli",
-                    extra={"err": repr(exc)},
-                )
-                self._config["transport"] = "cli"
 
     # ------------------------------------------------------------------ config
 
@@ -186,26 +183,13 @@ class IcmMemoryProvider:
             )
         except OSError as exc:
             logger.warning(
-                "save_config: could not persist sidecar",
+                "save_config: could not persist sidecar: %r",
+                exc,
                 extra={"hermes_home": str(hermes_home), "err": repr(exc)},
             )
             return {"error": f"could not persist config: {exc}"}
 
         return None
-
-    # ------------------------------------------------------------------ tools
-
-    def get_tool_schemas(self) -> list[dict[str, Any]]:
-        """Return the four LLM-facing tool schemas (delegates to ``tools.py``)."""
-        return tools.get_tool_schemas()
-
-    def handle_tool_call(self, name: str, args: dict[str, Any]) -> str:
-        """Dispatch an LLM tool call to ``tools.py``. Always returns a JSON string.
-
-        Per AD-07 / AD-10 / FR19, ``tools.handle_tool_call`` never raises and
-        always returns a ``json.dumps(...)`` string — never a dict.
-        """
-        return tools.handle_tool_call(self, name, args)
 
     # ------------------------------------------------------------------ S08 hot-path
     # The four hook methods + worker plumbing live here as thin wrappers around
@@ -261,7 +245,6 @@ class IcmMemoryProvider:
             queue_size=self._config_int("sync_write_queue_size"),
             db_path=self._db_path,
             write_timeout_ms=self._config_int("command_timeout_write_ms"),
-            transport=self._config_str("transport"),
         )
 
     # ------------------------------------------------------------------ prefetch
@@ -276,6 +259,7 @@ class IcmMemoryProvider:
             return ""
         if not self.is_available():
             return ""
+        recall_limit = self._config_int("recall_limit")
         # v0.1.1: ``_db_path is None`` is a legitimate "use icm canonical
         # default DB" sentinel (default-shared mode), not a "not initialized"
         # signal. The ``_init_args`` check upstream handles the latter.
@@ -283,23 +267,30 @@ class IcmMemoryProvider:
             hooks.run_prefetch(
                 query=query,
                 db_path=self._db_path,
-                limit=self._config_int("recall_limit"),
+                limit=recall_limit,
                 timeout_ms=self._config_int("command_timeout_read_ms"),
                 cache=self._prefetch_cache,
                 use_embeddings=self._config_bool("use_embeddings"),
-                transport=self._config_str("transport"),
             )
-        except Exception as exc:  # belt-and-braces; helper already swallows
+        except Exception as exc:  # AD-07 boundary — helper already swallows
             logger.warning(
-                "prefetch: outer boundary caught", extra={"err": repr(exc)}
+                "prefetch: outer boundary caught: %r",
+                exc,
+                extra={"err": repr(exc)},
             )
             return ""
-        self._latest_prefetch_key = hash(query)
+        # Bound the cache to the latest entry. ``system_prompt_block`` only
+        # reads ``_latest_prefetch_key`` (NFR-PERF-4), so older entries are
+        # dead weight that would otherwise leak monotonically across the
+        # gateway's lifetime.
+        latest_key = hash(query)
+        self._prefetch_cache = {latest_key: self._prefetch_cache.get(latest_key, [])}
+        self._latest_prefetch_key = latest_key
         # ``format_block`` returns ``""`` on empty hits — no extra short-circuit.
         return hooks.format_block(
             cache=self._prefetch_cache,
-            latest_key=self._latest_prefetch_key,
-            recall_limit=self._config_int("recall_limit"),
+            latest_key=latest_key,
+            recall_limit=recall_limit,
         )
 
     # ------------------------------------------------------------------ system_prompt_block
@@ -320,7 +311,8 @@ class IcmMemoryProvider:
             )
         except Exception as exc:  # defensive boundary
             logger.warning(
-                "system_prompt_block: outer boundary caught",
+                "system_prompt_block: outer boundary caught: %r",
+                exc,
                 extra={"err": repr(exc)},
             )
             return ""
@@ -350,7 +342,8 @@ class IcmMemoryProvider:
             )
         except Exception as exc:  # outer boundary — must not raise into the turn
             logger.warning(
-                "sync_turn: outer boundary caught",
+                "sync_turn: outer boundary caught: %r",
+                exc,
                 extra={"err": repr(exc)},
             )
 
@@ -373,14 +366,19 @@ class IcmMemoryProvider:
             )
         except Exception as exc:  # defensive boundary
             logger.warning(
-                "on_session_end: outer boundary caught",
+                "on_session_end: outer boundary caught: %r",
+                exc,
                 extra={"err": repr(exc)},
             )
-        # v0.2 — unconditional MCP teardown. Safe no-op when transport=cli.
-        try:
-            cli_runner.mcp_stop()
-        except Exception as exc:  # defensive — teardown must never raise
-            logger.warning(
-                "on_session_end: mcp_stop raised",
-                extra={"err": repr(exc)},
-            )
+
+    # ------------------------------------------------------------------ shutdown
+
+    def shutdown(self) -> None:
+        """Hermes lifecycle hook — no-op in v0.3.
+
+        Defined explicitly so hermes-agent's ``memory_manager`` no longer
+        logs ``'IcmMemoryProvider' object has no attribute 'shutdown'`` on
+        gateway restart. The v0.2 daemon torn down here is now owned by
+        hermes-native ``mcp_servers.icm:`` (AD-21).
+        """
+        return None

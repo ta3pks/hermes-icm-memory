@@ -38,18 +38,60 @@ Three steps, under five minutes on a machine where `icm` is already installed.
    hermes plugins enable hermes-icm-memory && hermes memory setup icm
    ```
 
-   Expected: Hermes reports the plugin enabled and the `icm` memory provider configured. New sessions will now recall from ICM at startup and write decisions, errors-resolved, preferences, and task summaries back to ICM after every turn — non-blockingly.
+   Then add `mcp_servers.icm:` to `~/.hermes/config.yaml` so the LLM can
+   call `icm_memory_recall`, `icm_memory_store`, `icm_memory_list_topics`,
+   and `icm_memory_health` tools natively (auto-discovered from
+   `icm serve`):
 
-### Want fast semantic recall on Pi? (v0.2)
+   ```yaml
+   mcp_servers:
+     icm:
+       command: icm
+       args: [serve, --no-embeddings]   # or omit --no-embeddings on fast hosts
+       timeout: 120
+       connect_timeout: 30
+   ```
 
-The default (`transport: cli`) spawns a fresh `icm` subprocess per call. On a 4 GB Raspberry Pi the multilingual-e5-base ONNX model takes ~50 s to load every time, so Pi users had to fall back to `use_embeddings: false` (keyword-only). v0.2 lets you keep semantic recall on Pi by amortizing the model load across one long-lived `icm serve` daemon:
+   Expected: Hermes reports the plugin enabled and the `icm` memory provider configured. New sessions will now recall from ICM at startup and write decisions, errors-resolved, preferences, and task summaries back to ICM after every turn — non-blockingly. The plugin auto-injects recalled memories into the system prompt every turn (via the `prefetch` lifecycle hook); the LLM gets `icm_memory_*` tools on demand from the hermes-native MCP server.
 
-```yaml
-transport: mcp
-use_embeddings: true
+## Architecture (v0.3)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       hermes-gateway                            │
+│                                                                 │
+│  ┌──────────────────────┐         ┌──────────────────────────┐  │
+│  │ memory_manager       │         │ mcp_servers.icm          │  │
+│  │ (lifecycle hooks)    │         │ (long-lived ``icm serve``)│  │
+│  │                      │         │                          │  │
+│  │ ┌──────────────────┐ │         │ ┌──────────────────────┐ │  │
+│  │ │hermes-icm-memory │ │         │ │ icm_memory_recall    │ │  │
+│  │ │  (this plugin)   │ │         │ │ icm_memory_store     │ │  │
+│  │ │                  │ │         │ │ icm_memory_list_topics│ │  │
+│  │ │ • prefetch()     │ │         │ │ icm_memory_health    │ │  │
+│  │ │ • system_prompt_ │ │         │ └──────────────────────┘ │  │
+│  │ │   block()        │ │         │     ▲ JSON-RPC           │  │
+│  │ │ • sync_turn()    │ │         │     │ (LLM tool calls)   │  │
+│  │ │ • shutdown()     │ │         └─────┼────────────────────┘  │
+│  │ └────────┬─────────┘ │               │                       │
+│  └───────────┼──────────┘               │                       │
+│              │ icm subprocess           │                       │
+│              │ (keyword recall, store)  │                       │
+└──────────────┼──────────────────────────┼───────────────────────┘
+               ▼                          ▼
+         ┌──────────────────────────────────┐
+         │   icm SQLite DB (shared)         │
+         │   ~/.local/share/icm/memories.db │
+         └──────────────────────────────────┘
 ```
 
-First recall after startup: ~50 s (model cold-start). Every subsequent recall: <1 s. The daemon lives for the duration of the Hermes provider; `on_session_end` tears it down (with an `atexit` backstop so SIGTERM-style shutdowns don't leak orphans). On desktop / cloud, the default `transport: cli` is fine — there's nothing to amortize.
+The plugin owns **lifecycle**: auto-prefetch on prompt-submit
+(`prefetch()` → cached hits → `system_prompt_block()` prepended into
+every turn's system prompt) and auto-store on triggered turns
+(`sync_turn()` → bounded queue → daemon worker → fresh `icm` subprocess
+per write). Hermes-native `mcp_servers.icm:` owns **tool exposure**:
+the LLM calls `icm_memory_*` directly through hermes' MCP client, with
+the embedding model warm-cached in the long-lived `icm serve` daemon.
 
 ## Features
 
@@ -72,15 +114,53 @@ Two keys control the trade-offs surfaced by the Pi 4 deploy on 2026-05-06; both 
 - **`isolated`** *(bool, default `false`)* — when `false`, the plugin omits `--db` and lets `icm` use its canonical OS-default database (the same SQLite file Claude Code, Cursor, OpenCode, etc. already share). This is the brief's "shared memory with editors" value prop. Set to `true` to opt into the v0.1.0 behaviour: a per-profile silo at `<hermes_home>/icm/<profile>.db`. Profile isolation requires `isolated: true`.
 - **`use_embeddings`** *(bool, default `true`)* — when `true`, `icm recall` uses semantic search via the configured icm embedding model (the Brief's value prop). Set to `false` on Pi-class hardware or anywhere the multilingual-e5-base ONNX model load (~50 s per subprocess invocation on a 4 GB Pi 4) blows past `command_timeout_read_ms`. Desktop / cloud hosts handle the default fine.
 
-### v0.2 — `transport: cli` vs. `transport: mcp`
+### v0.3 — hermes-native MCP for tools, lifecycle-only plugin
 
-- **`transport`** *(enum, default `"cli"`, choices `["cli", "mcp"]`)* — controls how `cli_runner` talks to `icm`.
-  - `cli` (default) spawns a fresh subprocess per call. Simple, no daemon, no extra ops surface. Fine for desktop / cloud, where the embedding-model cold-start is filesystem-cached and effectively free.
-  - `mcp` spawns one long-lived `icm serve` subprocess per provider lifetime and reuses it via newline-delimited JSON-RPC over stdin/stdout. The first recall pays the model cold-start (~50 s on Pi); every subsequent recall is sub-second. **Pair with `use_embeddings: true` for fast semantic recall on Pi.**
+The v0.2 `transport: mcp` config was removed. Hermes-Agent v0.3.0+
+ships first-class `mcp_servers.<name>:` config — hermes itself spawns
+`icm serve`, completes the JSON-RPC handshake, auto-discovers tools,
+and registers them alongside built-ins. The plugin's responsibility
+shrank to lifecycle hooks (which only it can do):
 
-When `transport: mcp` fails to start (`icm` missing, handshake timeout), the provider logs a WARNING and falls back to `transport: cli` for the rest of its lifetime — graceful degrade, never a hard fail.
+- **`prefetch` + `system_prompt_block`** — auto-injection of recalled
+  memories into the system prompt every turn. Uses fresh `icm` keyword
+  subprocesses (sub-100 ms on Pi when `use_embeddings: false`).
+- **`sync_turn`** — non-blocking trigger detection + bounded-queue daemon
+  writer (FIFO, drop-on-full per AD-04, lazy-respawn AD-15).
+- **`shutdown`** — explicit no-op so hermes' `memory_manager` stops
+  logging "object has no attribute 'shutdown'" on every gateway
+  restart.
 
-**Limitation.** Writes (`sync_turn` → bounded queue → daemon worker) still require a concrete `_db_path`, so under the default `isolated: false` the worker no-ops and writes are dropped silently. Operators who need writes today should set `isolated: true`. Shared-DB writes against the canonical icm file (concurrent-writer semantics with editors) is a v0.2 concern. See [CHANGELOG.md](./CHANGELOG.md) for the full migration note.
+LLM-side semantic recall is handled by `mcp_servers.icm:`: the
+embedding model loads once at hermes startup, every subsequent
+`icm_memory_recall` call is sub-second. See the migration note in
+[CHANGELOG.md](./CHANGELOG.md) for upgrading from v0.2.
+
+**Pi recipe.** Add this to your `~/.hermes/config.yaml`:
+
+```yaml
+plugins:
+  hermes-icm-memory:
+    use_embeddings: false        # plugin's prefetch hot-path: keyword-only
+
+mcp_servers:
+  icm:
+    command: icm
+    args: [serve]                # LLM tool path: warm semantic cache
+    timeout: 120
+    connect_timeout: 30
+```
+
+The plugin's prefetch fires keyword recall (fast on Pi); the LLM's
+on-demand semantic recall flows through the warm-cache hermes daemon.
+Best of both worlds, zero plugin-side daemon management.
+
+**Limitation.** Writes (`sync_turn` → bounded queue → daemon worker)
+still require a concrete `_db_path`, so under the default
+`isolated: false` the worker no-ops and writes are dropped silently.
+Operators who need plugin-side writes today should set `isolated: true`.
+Shared-DB writes against the canonical icm file (concurrent-writer
+semantics with editors) is a v0.4 concern.
 
 ## Development
 

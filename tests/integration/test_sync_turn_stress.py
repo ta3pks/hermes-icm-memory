@@ -15,7 +15,6 @@ Verifies:
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 import threading
@@ -67,8 +66,6 @@ def test_overflow_fifo_warning_no_exception(
         timeout_ms: int,
         keywords: str | None = None,
         raw: str | None = None,
-        *,
-        transport: str = "cli",
     ) -> None:
         # Block the worker until producers finish + we explicitly release.
         # 30 s ceiling guards against test-author errors leaving the gate shut.
@@ -79,7 +76,7 @@ def test_overflow_fifo_warning_no_exception(
         # assertion (e) `len(hits) == accepted` would otherwise fail spuriously.
         real_run_store(
             topic, content, importance, db_path, timeout_ms,
-            keywords=keywords, raw=raw, transport=transport,
+            keywords=keywords, raw=raw,
         )
         processed.append(content)
 
@@ -140,15 +137,19 @@ def test_overflow_fifo_warning_no_exception(
 
     # (d) No exception escaped: implicit — we got here without raising.
 
-    # (e) DB contains exactly `accepted` rows. Recall via the plugin and
-    # match against the unique marker substring shared by every fired item.
-    recall_payload = json.loads(
-        provider.handle_tool_call(
-            "icm_recall",
-            {"query": "s14stress-marker", "limit": burst_size + 5},
-        )
+    # (e) DB contains exactly `accepted` rows. Recall through ``cli_runner``
+    # directly — v0.3 removed the LLM-tool surface, so the plugin no longer
+    # exposes ``icm_recall`` for end-to-end test queries. ``run_recall`` is
+    # the same code path the (now hermes-native) MCP server uses.
+    db_path = provider._db_path
+    assert db_path is not None
+    hits = cli_runner.run_recall(
+        query="s14stress-marker",
+        limit=burst_size + 5,
+        db_path=db_path,
+        timeout_ms=10000,
+        use_embeddings=False,
     )
-    hits = recall_payload["hits"]
     assert len(hits) == accepted, (
         f"DB row count {len(hits)} != accepted {accepted}; "
         f"hits={[h.get('summary') for h in hits]!r}"
