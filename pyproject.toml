@@ -51,6 +51,16 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM"]
 strict = true
 python_version = "3.11"
 files = ["hermes_icm_memory", "tests"]
+# The repo root has a Hermes plugin entry shim (./__init__.py) for flat-discovery
+# that mypy treats as a package whose name (`hermes-icm-memory`) is invalid.
+# We don't type-check the shim — it's a 5-line re-export — but exclude it so
+# mypy doesn't walk up into the repo root.
+explicit_package_bases = true
+mypy_path = "."
+
+[[tool.mypy.overrides]]
+module = "__init__"
+ignore_errors = true
 
 [tool.coverage.run]
 branch = true
