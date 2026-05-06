@@ -113,10 +113,21 @@ def _run(argv: list[str], timeout_ms: int) -> subprocess.CompletedProcess[str]:
     return proc
 
 
+def _db_args(db_path: Path | None) -> list[str]:
+    """Return ``["--db", str(path)]`` when set, else ``[]`` (icm uses canonical default).
+
+    Omitting ``--db`` lets icm pick its OS-default location (e.g. XDG-resolved
+    ``~/.local/share/icm/memories.db`` on Linux), which is the same database
+    Claude Code, Cursor, OpenCode, etc. share. Passing an explicit ``db_path``
+    isolates the plugin into a separate file (opt-in profile isolation).
+    """
+    return ["--db", str(db_path)] if db_path is not None else []
+
+
 def run_recall(
     query: str,
     limit: int,
-    db_path: Path,
+    db_path: Path | None,
     timeout_ms: int,
     topic: str | None = None,
     project: str | None = None,
@@ -124,8 +135,7 @@ def run_recall(
     """Run ``icm recall`` and return the parsed JSON list of hits."""
     argv: list[str] = [
         "icm",
-        "--db",
-        str(db_path),
+        *_db_args(db_path),
         "recall",
         query,
         "--limit",
@@ -152,7 +162,7 @@ def run_store(
     topic: str,
     content: str,
     importance: str,
-    db_path: Path,
+    db_path: Path | None,
     timeout_ms: int,
     keywords: str | None = None,
     raw: str | None = None,
@@ -160,8 +170,7 @@ def run_store(
     """Run ``icm store``. Stdout is discarded; only ``returncode`` matters."""
     argv: list[str] = [
         "icm",
-        "--db",
-        str(db_path),
+        *_db_args(db_path),
         "store",
         "-t",
         topic,
@@ -185,13 +194,13 @@ def run_topics(db_path: Path, timeout_ms: int) -> list[dict[str, Any]]:
     each row's columns. Single-column output falls back to
     ``[{"topic": <line>}, ...]``.
     """
-    argv = ["icm", "--db", str(db_path), "topics"]
+    argv = ["icm", *_db_args(db_path), "topics"]
     proc = _run(argv, timeout_ms)
     return _parse_topics_table(proc.stdout)
 
 
 def run_health(
-    db_path: Path,
+    db_path: Path | None,
     timeout_ms: int,
     topic: str | None = None,
 ) -> dict[str, Any]:
@@ -201,7 +210,7 @@ def run_health(
     Raises ``ICMMalformedOutputError`` when non-blank stdout yields zero
     parseable lines.
     """
-    argv: list[str] = ["icm", "--db", str(db_path), "health"]
+    argv: list[str] = ["icm", *_db_args(db_path), "health"]
     if topic is not None:
         argv += ["-t", topic]
     proc = _run(argv, timeout_ms)
