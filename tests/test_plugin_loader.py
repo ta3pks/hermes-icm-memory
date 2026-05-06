@@ -68,12 +68,7 @@ def test_plugin_yaml_shape() -> None:
         assert key in manifest, f"plugin.yaml missing required key: {key}"
     assert manifest["name"] == "hermes-icm-memory"
     assert manifest["version"] == hermes_icm_memory.__version__
-    assert set(manifest["hooks"]) == {
-        "prefetch",
-        "system_prompt_block",
-        "sync_turn",
-        "on_session_end",
-    }
+    assert set(manifest["hooks"]) == set(_PLUGIN_YAML_HOOKS)
 
 
 # ---------------------------------------------------------------- S10 wiring
