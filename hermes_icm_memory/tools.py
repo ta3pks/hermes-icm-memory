@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from . import config
 from .cli_runner import run_health, run_recall, run_topics
+from .hooks import WriteTask
 
 if TYPE_CHECKING:
     from .provider import IcmMemoryProvider
@@ -276,11 +277,11 @@ def _handle_store(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
     if not isinstance(content, str) or not content:
         return json.dumps({"error": "missing required arg: content"})
 
-    task = (
-        topic,
-        _importance_for(provider, args.get("importance")),
-        content,
-        _normalize_keywords(args.get("keywords")),
+    task = WriteTask(
+        topic=topic,
+        importance=_importance_for(provider, args.get("importance")),
+        content=content,
+        keywords=tuple(_normalize_keywords(args.get("keywords"))),
     )
 
     write_queue = getattr(provider, "_write_queue", None)

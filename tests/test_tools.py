@@ -1,18 +1,13 @@
 """Tests for ``hermes_icm_memory.tools`` (S09).
 
-Strict TDD: this file lands first (RED), then ``tools.py`` implements
-exactly what these cases assert (GREEN). The 16 cases trace 1-to-1 to
-ACs 1–16 of story 4.2 (epic 4 / S09).
+The 16 ACs trace 1-to-1 to story 4.2 (epic 4 / S09); the rest of the file
+covers defensive paths surfaced during code review.
 
-Coordination with S08 (running in parallel) — the provider's
-``_write_queue`` attribute is owned by S08. Until merge, these tests
-mock it directly via ``monkeypatch.setattr(provider, "_write_queue", ...)``.
-The assumed contract is
-
-    Trigger = tuple[str, str, str, list[str]]   # (topic, importance, content, keywords)
-    provider._write_queue: queue.Queue[Trigger]
-
-— recorded in the story spec so the manager can validate at merge time.
+S08 owns ``provider._worker_state.write_queue`` (typed
+``queue.Queue[hooks.WriteTask] | None``); ``provider._write_queue`` on the
+provider is a read-only property over that field. Tests therefore install
+their own ``queue.Queue`` on ``_worker_state.write_queue`` and assert on
+``WriteTask`` field access, not tuple indexing.
 """
 
 from __future__ import annotations
@@ -34,6 +29,7 @@ from hermes_icm_memory.errors import (
     ICMNotFoundError,
     ICMTimeoutError,
 )
+from hermes_icm_memory.hooks import WriteTask
 from hermes_icm_memory.provider import IcmMemoryProvider
 
 # ---------- helpers -----------------------------------------------------------
@@ -53,17 +49,28 @@ def _read_provider() -> IcmMemoryProvider:
 
 
 def _provider_with_queue(qsize: int = 8) -> IcmMemoryProvider:
-    """Fresh provider with a real bounded queue + `_db_path` attached.
+    """Fresh provider with a bounded write queue + `_db_path` attached.
 
-    Sets `_db_path` so cross-handler tests (AC14, AC15) that exercise both
-    read-paths and the store-path on the same provider don't short-circuit
-    on the read-path's "provider not initialized" guard.
+    Mocks at the source: ``_worker_state.write_queue`` is the writable field
+    that ``provider._write_queue`` (read-only property) reads from.
     """
     p = IcmMemoryProvider()
     p._db_path = _FAKE_DB
-    # AD-12 / S08 contract — see module docstring.
-    p._write_queue = queue.Queue(maxsize=qsize)  # type: ignore[attr-defined]
+    p._worker_state.write_queue = queue.Queue(maxsize=qsize)
     return p
+
+
+def _drain_queue(provider: IcmMemoryProvider) -> WriteTask:
+    """Pop the next task from the provider's write queue (test helper)."""
+    q = provider._worker_state.write_queue
+    assert q is not None, "test fixture must install a queue first"
+    return q.get_nowait()
+
+
+def _queue_size(provider: IcmMemoryProvider) -> int:
+    """Return the current queue depth (0 if no queue installed)."""
+    q = provider._worker_state.write_queue
+    return 0 if q is None else q.qsize()
 
 
 # =============================================================================
@@ -190,12 +197,12 @@ def test_recall_failure_returns_empty_hits_and_warns(
 
 
 # =============================================================================
-# AC5 + AC6 — store enqueues a (topic, importance, content, keywords) tuple
+# AC5 + AC6 — store enqueues a WriteTask (topic, importance, content, keywords)
 # =============================================================================
 
 
 def test_store_enqueues_and_returns_immediately() -> None:
-    """AC5/AC6 — exactly one tuple enqueued; return shape correct."""
+    """AC5/AC6 — exactly one WriteTask enqueued; return shape correct."""
     provider = _provider_with_queue()
     result = provider.handle_tool_call(
         "icm_store",
@@ -207,15 +214,14 @@ def test_store_enqueues_and_returns_immediately() -> None:
     assert payload["accepted"] is True
     assert isinstance(payload["queued_at"], str)
 
-    # Single task enqueued with the documented 4-tuple shape.
-    assert provider._write_queue.qsize() == 1  # type: ignore[attr-defined]
-    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
-    assert isinstance(task, tuple) and len(task) == 4
-    topic, importance, content, keywords = task
-    assert topic == "preferences"
-    assert importance == "high"  # default
-    assert content == "Always use bun"
-    assert keywords == []
+    # Single task enqueued with the documented WriteTask shape.
+    assert _queue_size(provider) == 1
+    task = _drain_queue(provider)
+    assert isinstance(task, WriteTask)
+    assert task.topic == "preferences"
+    assert task.importance == "high"  # default
+    assert task.content == "Always use bun"
+    assert task.keywords == ()  # empty tuple, not list
 
 
 # =============================================================================
@@ -284,7 +290,7 @@ def test_store_invalid_args_returns_error_json(
     payload = json.loads(result)
     assert "error" in payload
     assert missing_key in payload["error"]
-    assert provider._write_queue.qsize() == 0  # type: ignore[attr-defined]
+    assert _queue_size(provider) == 0
 
 
 # =============================================================================
@@ -479,19 +485,19 @@ def test_store_with_explicit_importance_uses_caller_value() -> None:
         "icm_store",
         {"topic": "p", "content": "c", "importance": "critical"},
     )
-    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
-    assert task[1] == "critical"
+    task = _drain_queue(provider)
+    assert task.importance == "critical"
 
 
 def test_store_keywords_list_is_stringified() -> None:
-    """Caller list[str] keywords flow through as list[str]."""
+    """Caller list[str] keywords flow through as a tuple[str, ...]."""
     provider = _provider_with_queue()
     provider.handle_tool_call(
         "icm_store",
         {"topic": "p", "content": "c", "keywords": ["bun", "package-manager"]},
     )
-    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
-    assert task[3] == ["bun", "package-manager"]
+    task = _drain_queue(provider)
+    assert task.keywords == ("bun", "package-manager")
 
 
 def test_store_keywords_csv_string_is_split() -> None:
@@ -501,19 +507,19 @@ def test_store_keywords_csv_string_is_split() -> None:
         "icm_store",
         {"topic": "p", "content": "c", "keywords": "bun, package-manager,  npm"},
     )
-    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
-    assert task[3] == ["bun", "package-manager", "npm"]
+    task = _drain_queue(provider)
+    assert task.keywords == ("bun", "package-manager", "npm")
 
 
 def test_store_keywords_unknown_type_falls_back_to_empty() -> None:
-    """Caller-supplied junk → empty list (no crash)."""
+    """Caller-supplied junk → empty tuple (no crash)."""
     provider = _provider_with_queue()
     provider.handle_tool_call(
         "icm_store",
         {"topic": "p", "content": "c", "keywords": 12345},
     )
-    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
-    assert task[3] == []
+    task = _drain_queue(provider)
+    assert task.keywords == ()
 
 
 def test_store_queue_full_returns_error_json(
@@ -521,8 +527,10 @@ def test_store_queue_full_returns_error_json(
 ) -> None:
     """`queue.Full` → drop-with-WARNING + error JSON."""
     provider = _provider_with_queue(qsize=1)
-    # Fill the queue.
-    provider._write_queue.put_nowait(("a", "high", "x", []))  # type: ignore[attr-defined]
+    # Fill the queue with a real WriteTask so the type matches the queue's hint.
+    filler = WriteTask(topic="a", importance="high", content="x", keywords=())
+    assert provider._worker_state.write_queue is not None
+    provider._worker_state.write_queue.put_nowait(filler)
 
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.tools"):
         result = provider.handle_tool_call(
@@ -538,9 +546,9 @@ def test_store_queue_full_returns_error_json(
 def test_store_without_queue_returns_error_json(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Missing `_write_queue` (S08 not yet merged) → error JSON, no raise."""
+    """No write queue installed → error JSON, no raise (defense-in-depth)."""
     provider = _read_provider()
-    # Note: no _provider_with_queue helper — bare provider has no _write_queue.
+    # _read_provider() leaves _worker_state.write_queue=None (default).
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.tools"):
         result = provider.handle_tool_call(
             "icm_store",
@@ -681,8 +689,8 @@ def test_store_importance_fallback_ladder(
     if importance_arg is not None:
         args["importance"] = importance_arg
     provider.handle_tool_call("icm_store", args)
-    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
-    assert task[1] == expected
+    task = _drain_queue(provider)
+    assert task.importance == expected
 
 
 def test_store_with_non_dict_config_falls_back_to_default_importance() -> None:
@@ -690,8 +698,8 @@ def test_store_with_non_dict_config_falls_back_to_default_importance() -> None:
     provider = _provider_with_queue()
     provider._config = None  # type: ignore[assignment]
     provider.handle_tool_call("icm_store", {"topic": "p", "content": "c"})
-    task = provider._write_queue.get_nowait()  # type: ignore[attr-defined]
-    assert task[1] == "high"
+    task = _drain_queue(provider)
+    assert task.importance == "high"
 
 
 @pytest.mark.parametrize(
