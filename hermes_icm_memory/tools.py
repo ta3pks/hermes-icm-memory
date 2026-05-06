@@ -1,22 +1,12 @@
-"""LLM-facing tool dispatch (FR8, FR11, FR13, FR17, FR19).
+"""LLM-facing tool dispatch — four canonical tools for the agent turn.
 
-Pure dispatch functions: ``provider.handle_tool_call`` delegates to
-:func:`handle_tool_call` here, which routes the four canonical names
-(``icm_recall``, ``icm_store``, ``icm_topics``, ``icm_health``) to the
-private ``_handle_*`` functions.
-
-Architecture invariants:
-
-* **AD-10** — every handler returns ``json.dumps(...)``. Never a dict.
-* **AD-12 / NFR-MAINT-2** — this module MUST NOT import ``subprocess``.
-  All ICM I/O flows through :mod:`hermes_icm_memory.cli_runner`.
-* **AD-13 / NFR-OBS-1** — module-level ``logger = logging.getLogger(__name__)``.
-* **AD-07 / NFR-REL-1 / FR19** — every handler is wrapped at the outermost
-  boundary; on any failure we log a WARNING with ``extra={...}`` and return
-  the documented degrade JSON. No exception escapes to the agent turn.
-* **NFR-PERF-1 / FR13** — ``icm_store`` is non-blocking: validate, enqueue
-  via ``provider._write_queue.put_nowait``, return. The actual ``icm store``
-  subprocess runs on the daemon worker (S08).
+``provider.handle_tool_call`` delegates to :func:`handle_tool_call` here,
+which routes ``icm_recall`` / ``icm_store`` / ``icm_topics`` / ``icm_health``
+to private handlers. Every handler returns a ``json.dumps(...)`` string —
+never a dict, never raises. ``cli_runner`` is the only ICM I/O surface; this
+module never imports ``subprocess``. ``icm_store`` is non-blocking: it
+validates, enqueues via ``provider._write_queue.put_nowait``, and returns;
+the actual ``icm store`` subprocess runs on the daemon worker.
 """
 
 from __future__ import annotations
@@ -29,6 +19,7 @@ import queue
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Final
 
+from . import config
 from .cli_runner import run_health, run_recall, run_topics
 
 if TYPE_CHECKING:
@@ -44,13 +35,9 @@ _DEFAULT_IMPORTANCE: Final[str] = "high"
 _DEFAULT_RECALL_LIMIT: Final[int] = 5
 _DEFAULT_READ_TIMEOUT_MS: Final[int] = 2000
 
-#: Schema enum for ``icm_store.importance`` (mirrors architecture §11.1).
-#: Bogus values are mapped to the default rather than passed through to the
-#: worker — closes a Phase 3 Edge Case Hunter finding (silent corruption of
-#: agent expectation when ``icm`` would have rejected the bad ``-i`` value).
-_VALID_IMPORTANCE: Final[frozenset[str]] = frozenset(
-    {"critical", "high", "medium", "low"}
-)
+#: Single source of truth for the importance enum, shared with the config
+#: schema. Bogus values fall back rather than reach the worker.
+_VALID_IMPORTANCE: Final[frozenset[str]] = frozenset(config.IMPORTANCE_CHOICES)
 
 # ---- Tool schemas (PRD §8.6) — frozen at import; deep-copied to callers ----
 
@@ -101,7 +88,7 @@ _TOOL_SCHEMAS: Final[list[dict[str, Any]]] = [
                 },
                 "importance": {
                     "type": "string",
-                    "enum": ["critical", "high", "medium", "low"],
+                    "enum": list(config.IMPORTANCE_CHOICES),
                     "default": _DEFAULT_IMPORTANCE,
                     "description": "Importance level for ICM ranking.",
                 },
@@ -149,69 +136,69 @@ _TOOL_SCHEMAS: Final[list[dict[str, Any]]] = [
 
 
 def get_tool_schemas() -> list[dict[str, Any]]:
-    """Return a fresh deep copy of the four LLM-facing tool schemas (AC1, AC2)."""
+    """Return a fresh deep copy of the four LLM-facing tool schemas."""
     return copy.deepcopy(_TOOL_SCHEMAS)
 
 
 # ---- Internal helpers --------------------------------------------------------
 
 
-def _read_timeout_ms(provider: IcmMemoryProvider) -> int:
-    """Resolve the read-path timeout from provider config or fall back.
+def _positive_int(value: object) -> int | None:
+    """Return ``value`` if it is a positive int (rejecting bool); else ``None``."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
 
-    Defensive: if ``_config`` was rebound to a non-mapping value, fall back
-    rather than raise ``AttributeError`` and route to the generic crash
-    response (which would violate the documented per-tool degrade shape).
+
+def _provider_config(provider: IcmMemoryProvider) -> dict[str, Any]:
+    """Return the provider's ``_config`` dict, or ``{}`` if missing/corrupt.
+
+    Defensive: if a future caller rebinds ``_config`` to a non-mapping value,
+    fall back rather than raise ``AttributeError`` and route to the generic
+    crash response (which would violate the documented per-tool degrade shape).
     """
     cfg = getattr(provider, "_config", None)
-    if not isinstance(cfg, dict):
-        return _DEFAULT_READ_TIMEOUT_MS
-    raw = cfg.get("command_timeout_read_ms")
-    if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
-        return raw
-    return _DEFAULT_READ_TIMEOUT_MS
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _read_timeout_ms(provider: IcmMemoryProvider) -> int:
+    """Resolve the read-path timeout from provider config or fall back."""
+    return _positive_int(_provider_config(provider).get("command_timeout_read_ms")) or (
+        _DEFAULT_READ_TIMEOUT_MS
+    )
 
 
 def _recall_limit(provider: IcmMemoryProvider, override: object) -> int:
     """Resolve the recall limit from caller arg, then config, then default."""
-    if isinstance(override, int) and not isinstance(override, bool) and override > 0:
-        return override
-    cfg = getattr(provider, "_config", None)
-    if isinstance(cfg, dict):
-        cfg_limit = cfg.get("recall_limit")
-        if (
-            isinstance(cfg_limit, int)
-            and not isinstance(cfg_limit, bool)
-            and cfg_limit > 0
-        ):
-            return cfg_limit
-    return _DEFAULT_RECALL_LIMIT
+    return (
+        _positive_int(override)
+        or _positive_int(_provider_config(provider).get("recall_limit"))
+        or _DEFAULT_RECALL_LIMIT
+    )
 
 
 def _importance_for(provider: IcmMemoryProvider, override: object) -> str:
     """Resolve importance from caller arg, then config, then default.
 
-    Validates against ``_VALID_IMPORTANCE`` — bogus enum values fall back
-    rather than reach the worker (closes Phase 3 finding).
+    Validates against the schema enum so bogus values fall back rather than
+    reach ``icm store -i <bogus>`` on the worker thread.
     """
     if isinstance(override, str) and override in _VALID_IMPORTANCE:
         return override
-    cfg = getattr(provider, "_config", None)
-    if isinstance(cfg, dict):
-        cfg_importance = cfg.get("default_importance")
-        if isinstance(cfg_importance, str) and cfg_importance in _VALID_IMPORTANCE:
-            return cfg_importance
+    cfg_importance = _provider_config(provider).get("default_importance")
+    if isinstance(cfg_importance, str) and cfg_importance in _VALID_IMPORTANCE:
+        return cfg_importance
     return _DEFAULT_IMPORTANCE
 
 
 def _normalize_keywords(raw: object) -> list[str]:
-    """Coerce caller ``keywords`` into a ``list[str]``.
+    """Coerce caller ``keywords`` to ``list[str]``.
 
-    Accepts ``list[str]``, comma-separated string, or anything else (→ ``[]``).
+    Accepts a list, a comma-separated string, or anything else (→ ``[]``).
     Used by :func:`_handle_store` so the queue task shape stays uniform.
     """
-    if raw is None:
-        return []
     if isinstance(raw, list):
         return [str(k) for k in raw]
     if isinstance(raw, str):
@@ -224,11 +211,43 @@ def _iso_now() -> str:
     return _dt.datetime.now(_dt.UTC).isoformat(timespec="microseconds")
 
 
+#: Empty degrade payload for each read-path tool name (single-pair JSON).
+_EMPTY_READ_PAYLOAD: Final[dict[str, dict[str, Any]]] = {
+    "icm_recall": {"hits": []},
+    "icm_topics": {"topics": []},
+    "icm_health": {"report": {}},
+}
+
+
+def _run_read(
+    provider: IcmMemoryProvider,
+    name: str,
+    payload_key: str,
+    do_call: Callable[[Any, int], Any],
+) -> str:
+    """Shared guard + try/except/log/degrade shape for every read tool.
+
+    The caller passes a ``do_call(db_path, timeout_ms) -> result`` closure
+    so each handler can shape ``cli_runner``'s positional args itself
+    (``run_recall`` leads with ``query, limit``; ``run_topics`` /
+    ``run_health`` lead with ``db_path, timeout_ms``).
+    """
+    db_path = provider._db_path
+    if db_path is None:
+        logger.warning("%s: provider not initialized", name, extra={"tool": name})
+        return json.dumps(_EMPTY_READ_PAYLOAD[name])
+    try:
+        result = do_call(db_path, _read_timeout_ms(provider))
+    except Exception as exc:  # noqa: BLE001 — every read path degrades, never raises.
+        logger.warning("%s failed", name, extra={"tool": name, "err": repr(exc)})
+        return json.dumps(_EMPTY_READ_PAYLOAD[name])
+    return json.dumps({payload_key: result})
+
+
 # ---- Per-tool handlers -------------------------------------------------------
 
 
 def _handle_recall(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
-    """Run ``icm recall`` via ``cli_runner``; degrade to ``{"hits": []}`` on failure."""
     query = args.get("query")
     if not isinstance(query, str) or not query:
         logger.warning(
@@ -237,36 +256,19 @@ def _handle_recall(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
         )
         return json.dumps({"hits": []})
 
-    db_path = provider._db_path
-    if db_path is None:
-        logger.warning("icm_recall: provider not initialized", extra={"tool": "icm_recall"})
-        return json.dumps({"hits": []})
-
+    limit = _recall_limit(provider, args.get("limit"))
     topic = args.get("topic") if isinstance(args.get("topic"), str) else None
     project = args.get("project") if isinstance(args.get("project"), str) else None
 
-    try:
-        limit = _recall_limit(provider, args.get("limit"))
-        hits = run_recall(
-            query,
-            limit,
-            db_path,
-            _read_timeout_ms(provider),
-            topic=topic,
-            project=project,
-        )
-    except Exception as exc:  # noqa: BLE001 — degrade per FR19 / AC4.
-        logger.warning(
-            "icm_recall failed",
-            extra={"tool": "icm_recall", "err": repr(exc)},
-        )
-        return json.dumps({"hits": []})
-
-    return json.dumps({"hits": hits})
+    return _run_read(
+        provider,
+        "icm_recall",
+        "hits",
+        lambda db, ms: run_recall(query, limit, db, ms, topic=topic, project=project),
+    )
 
 
 def _handle_store(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
-    """Validate + enqueue a write task; never blocks (FR13, NFR-PERF-1)."""
     topic = args.get("topic")
     if not isinstance(topic, str) or not topic:
         return json.dumps({"error": "missing required arg: topic"})
@@ -274,10 +276,12 @@ def _handle_store(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
     if not isinstance(content, str) or not content:
         return json.dumps({"error": "missing required arg: content"})
 
-    importance = _importance_for(provider, args.get("importance"))
-    keywords = _normalize_keywords(args.get("keywords"))
-
-    task: tuple[str, str, str, list[str]] = (topic, importance, content, keywords)
+    task = (
+        topic,
+        _importance_for(provider, args.get("importance")),
+        content,
+        _normalize_keywords(args.get("keywords")),
+    )
 
     write_queue = getattr(provider, "_write_queue", None)
     if write_queue is None:
@@ -300,45 +304,15 @@ def _handle_store(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
 
 
 def _handle_topics(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
-    """Return the ICM topic list; degrade to ``{"topics": []}`` on failure."""
-    del args  # unused — icm_topics takes no parameters
-    db_path = provider._db_path
-    if db_path is None:
-        logger.warning(
-            "icm_topics: provider not initialized",
-            extra={"tool": "icm_topics"},
-        )
-        return json.dumps({"topics": []})
-    try:
-        topics = run_topics(db_path, _read_timeout_ms(provider))
-    except Exception as exc:  # noqa: BLE001 — degrade per FR19 / AC9.
-        logger.warning(
-            "icm_topics failed",
-            extra={"tool": "icm_topics", "err": repr(exc)},
-        )
-        return json.dumps({"topics": []})
-    return json.dumps({"topics": topics})
+    del args  # icm_topics takes no parameters
+    return _run_read(provider, "icm_topics", "topics", run_topics)
 
 
 def _handle_health(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
-    """Return the ICM health report; degrade to ``{"report": {}}`` on failure."""
     topic = args.get("topic") if isinstance(args.get("topic"), str) else None
-    db_path = provider._db_path
-    if db_path is None:
-        logger.warning(
-            "icm_health: provider not initialized",
-            extra={"tool": "icm_health"},
-        )
-        return json.dumps({"report": {}})
-    try:
-        report = run_health(db_path, _read_timeout_ms(provider), topic=topic)
-    except Exception as exc:  # noqa: BLE001 — degrade per FR19 / AC12.
-        logger.warning(
-            "icm_health failed",
-            extra={"tool": "icm_health", "err": repr(exc)},
-        )
-        return json.dumps({"report": {}})
-    return json.dumps({"report": report})
+    return _run_read(
+        provider, "icm_health", "report", lambda db, ms: run_health(db, ms, topic=topic)
+    )
 
 
 # ---- Public dispatch ---------------------------------------------------------
@@ -356,14 +330,12 @@ _DISPATCH: Final[
 def handle_tool_call(
     provider: IcmMemoryProvider, name: str, args: dict[str, Any] | None
 ) -> str:
-    """Dispatch an LLM tool call to the right ``_handle_*``.
+    """Route a tool call to the right handler. Never raises.
 
-    Always returns ``json.dumps(...)``. Never raises (AD-07 / FR19): the
-    outermost ``except Exception`` net traps anything the handlers fail to
-    catch (untyped runtime explosions, garbage input that slips past
-    validation) and produces a documented error JSON instead. Non-dict
-    ``args`` (None, list, scalar) are coerced to ``{}`` so the per-tool
-    degrade shape still wins over the generic crash JSON.
+    Non-dict ``args`` (None, list, scalar) are coerced to ``{}`` so the
+    per-tool degrade shape still wins over the generic crash JSON. The
+    outermost ``except Exception`` is defense-in-depth against a future
+    handler regression that forgets its own try/except.
     """
     handler = _DISPATCH.get(name)
     if handler is None:
@@ -371,9 +343,8 @@ def handle_tool_call(
     safe_args: dict[str, Any] = args if isinstance(args, dict) else {}
     try:
         return handler(provider, safe_args)
-    except Exception as exc:  # noqa: BLE001 — AD-07 outermost net is intentional
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "tool handler crashed",
-            extra={"tool": name, "err": repr(exc)},
+            "tool handler crashed", extra={"tool": name, "err": repr(exc)}
         )
         return json.dumps({"error": "tool handler crashed"})

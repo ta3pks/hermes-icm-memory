@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Final
 
 __all__ = [
+    "IMPORTANCE_CHOICES",
     "get_default_schema",
     "mkdir_parent",
     "resolve_db_path",
@@ -29,8 +30,9 @@ __all__ = [
 
 _DEFAULT_PROFILE: Final[str] = "default"
 
-#: Importance enum values accepted by ICM (architecture §11.1).
-_IMPORTANCE_CHOICES: Final[tuple[str, ...]] = ("critical", "high", "medium", "low")
+#: Importance enum values accepted by ICM (architecture §11.1). Public so
+#: ``tools.py`` can derive its enum without duplicating the literal tuple.
+IMPORTANCE_CHOICES: Final[tuple[str, ...]] = ("critical", "high", "medium", "low")
 
 #: Architecture §10.1 — ten frozen config entries. Module-private; callers get
 #: a defensive copy via :func:`get_default_schema`.
@@ -39,7 +41,7 @@ _SCHEMA_ENTRIES: Final[list[dict[str, Any]]] = [
         "key": "default_importance",
         "type": "enum",
         "default": "high",
-        "choices": list(_IMPORTANCE_CHOICES),
+        "choices": list(IMPORTANCE_CHOICES),
         "secret": False,
         "required": False,
         "description": (
