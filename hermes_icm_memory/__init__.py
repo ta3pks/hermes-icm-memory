@@ -1,9 +1,15 @@
 """hermes-icm-memory — Hermes Agent memory provider plugin backed by ICM.
 
-Hermes calls ``register(ctx)`` after loading ``plugin.yaml``. For S01 we
-register a placeholder provider so the entry-point + plugin-manifest plumbing
-is exercised end-to-end with a passing baseline test. S10 replaces
-``_StubProvider`` with the real ``IcmMemoryProvider`` from ``provider.py``.
+Hermes calls :func:`register` with a plugin context after loading
+``plugin.yaml``. The function constructs an :class:`IcmMemoryProvider` (which
+binds the four declared hook callbacks: ``prefetch``, ``system_prompt_block``,
+``sync_turn``, ``on_session_end``) and hands it to
+``ctx.register_memory_provider``.
+
+Module-level side effects are forbidden — registration happens only inside
+the explicit :func:`register` call (test:
+``test_register_called_once_idempotent_module_import``). Per AD-12 this
+module MUST NOT import ``subprocess``.
 """
 
 from __future__ import annotations
@@ -11,21 +17,11 @@ from __future__ import annotations
 from typing import Any
 
 from ._version import __version__
+from .provider import IcmMemoryProvider
 
-__all__ = ["__version__", "register"]
-
-
-class _StubProvider:
-    """Placeholder memory provider. Replaced in S10 by IcmMemoryProvider."""
-
-    name = "icm"
+__all__ = ["IcmMemoryProvider", "__version__", "register"]
 
 
 def register(ctx: Any) -> None:
-    """Plugin entry point invoked by Hermes after loading ``plugin.yaml``.
-
-    Constructs a memory provider and registers it with the Hermes context
-    exactly once. S01 ships a stub; S10 swaps in the real provider.
-    """
-    provider = _StubProvider()
-    ctx.register_memory_provider(provider)
+    """Hermes plugin entry point. Construct the provider and hand it to ctx."""
+    ctx.register_memory_provider(IcmMemoryProvider())
