@@ -3,24 +3,26 @@
 Simulates a Claude Code (or any other ICM client) write by invoking
 ``subprocess.run(["icm", "--no-embeddings", "--db", <db>, "store", ...])``
 directly against the same DB the provider is initialized over. Then asserts
-the plugin's ``icm_recall`` tool path returns the externally-written memory.
+the plugin's ``cli_runner.run_recall`` (same code path the prefetch hook
+uses) returns the externally-written memory.
+
+v0.3 — the LLM-tool surface (``handle_tool_call``) was removed; this test
+now exercises the read path through ``cli_runner.run_recall`` directly.
 
 Note on the ``subprocess`` import: S11's AST invariant test is scoped to
 ``hermes_icm_memory/`` source files only — test files are exempt by design.
-The cross-tool scenario inherently requires simulating an external writer,
-which means a direct subprocess call from the test side.
+The cross-tool scenario inherently requires simulating an external writer.
 """
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess  # external-write simulation; see module docstring.
 from pathlib import Path
 
 import pytest
 
-from hermes_icm_memory import config
+from hermes_icm_memory import cli_runner, config
 from hermes_icm_memory.provider import IcmMemoryProvider
 
 pytestmark = pytest.mark.skipif(
@@ -39,8 +41,6 @@ def test_external_write_visible_to_plugin(
     provider._config["isolated"] = True
     provider.initialize("s14-cross-tool", str(tmp_path))
 
-    # Resolve the same DB path the provider derived from `tmp_path` so the
-    # external write lands in the exact file the plugin will recall against.
     db_path = config.resolve_db_path(tmp_path, profile=None)
     config.mkdir_parent(db_path)
 
@@ -73,16 +73,14 @@ def test_external_write_visible_to_plugin(
         f"external icm store failed: rc={proc.returncode} stderr={proc.stderr!r}"
     )
 
-    recall_payload = json.loads(
-        provider.handle_tool_call(
-            "icm_recall",
-            {"query": marker, "limit": 5},
-        )
+    hits = cli_runner.run_recall(
+        query=marker,
+        limit=5,
+        db_path=db_path,
+        timeout_ms=10000,
+        use_embeddings=False,
     )
-    hits = recall_payload["hits"]
-    assert isinstance(hits, list) and hits, (
-        f"plugin recall saw no hits for external write: {recall_payload!r}"
-    )
+    assert hits, f"plugin recall saw no hits for external write: {hits!r}"
     assert any(
         marker in (h.get("summary") or "") for h in hits
     ), f"no hit contained marker {marker!r}; hits={hits!r}"

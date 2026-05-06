@@ -1,6 +1,19 @@
 # Product Brief: hermes-icm-memory
 
-**Status:** Approved (BMAD Phase 1, 2026-05-05) · **Author:** Manager (BMAD greenfield kickoff) · **License:** Apache-2.0
+**Status:** Approved (BMAD Phase 1, 2026-05-05; scope-amended 2026-05-07 for v0.3) · **Author:** Manager (BMAD greenfield kickoff) · **License:** Apache-2.0
+
+> **v0.3 scope amendment (2026-05-07).** Hermes-Agent v0.3.0 (March 17,
+> 2026) shipped first-class `mcp_servers.<name>:` config — hermes itself
+> spawns the MCP subprocess, completes the JSON-RPC handshake, and
+> auto-discovers tools. The plugin's responsibility is therefore
+> reduced to **lifecycle hooks only** (`prefetch` /
+> `system_prompt_block` / `sync_turn` / `on_session_end` / `shutdown`);
+> LLM-side tool exposure (`icm_memory_recall` / `icm_memory_store` /
+> `icm_memory_list_topics` / `icm_memory_health`) flows through
+> hermes-native `mcp_servers.icm:` config. The plugin's auto-injection
+> of recalled memories on prompt-submit — the Brief's value-prop hot
+> path — is preserved unchanged. See ADR AD-21/AD-22 in the
+> architecture doc for the rationale.
 
 ## Executive Summary
 
@@ -79,8 +92,8 @@ The honest moat is execution: getting the lifecycle hooks right (especially `syn
 - `MemoryProvider` subclass `IcmMemoryProvider` registered via `ctx.register_memory_provider(...)`.
 - `is_available()` — checks `icm` on PATH, no network calls.
 - `initialize(session_id, hermes_home)` — derives DB path under `hermes_home/icm/`, calls `icm init` if needed.
-- `get_tool_schemas()` + `handle_tool_call()` — exposes `icm_recall`, `icm_store`, `icm_topics`, `icm_health` to the LLM.
-- Hooks: `prefetch` (semantic recall by recent turn content), `system_prompt_block` (inject top-K recalled memories + project context summary), `sync_turn` (non-blocking write of detected triggers via daemon thread), `on_session_end` (flush + lightweight consolidation).
+- ~~`get_tool_schemas()` + `handle_tool_call()`~~ — **removed in v0.3 (AD-21).** LLM tool exposure (`icm_memory_recall`, `icm_memory_store`, `icm_memory_list_topics`, `icm_memory_health`) is now hermes-native via `mcp_servers.icm:` config; the plugin no longer carries an LLM tool surface.
+- Hooks: `prefetch` (semantic recall by recent turn content), `system_prompt_block` (inject top-K recalled memories + project context summary), `sync_turn` (non-blocking write of detected triggers via daemon thread), `on_session_end` (flush + lightweight consolidation), `shutdown` (no-op so hermes' `memory_manager` doesn't WARN at gateway restart).
 - Importance + topic mapping: errors-resolved/preferences/decisions/learnings/context-{project} — same five triggers as the editor-side rules.
 - `get_config_schema()` + `save_config()` — user-tunable: importance default, topic prefix, recall limit, prefetch on/off.
 - Apache-2.0 LICENSE + README + minimal CONTRIBUTING + GitHub Actions CI (lint + tests on Python 3.11/3.12).
@@ -89,7 +102,7 @@ The honest moat is execution: getting the lifecycle hooks right (especially `syn
 
 ### Out (v1)
 
-- ICM MCP server transport. CLI shellout only for v1; MCP integration is a v2 concern.
+- ~~ICM MCP server transport.~~ — **delivered in v0.3 (AD-21):** hermes-native `mcp_servers.icm:` config now spawns and manages `icm serve` outside the plugin. The plugin's hot-path prefetch keeps the fresh-CLI keyword path (sub-100 ms on Pi).
 - Multi-user / shared-DB deployments.
 - A web UI / dashboard for browsing memories (ICM's own CLI suffices).
 - Custom embedding models. ICM's default (multilingual-e5-base) is fine; user can configure ICM separately.

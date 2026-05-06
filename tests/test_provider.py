@@ -275,42 +275,11 @@ def test_save_config_rejects_invalid_returns_error_dict(tmp_hermes_home: Path) -
     assert provider._config == {}
 
 
-# ---------- AC13: handle_tool_call unknown-name dispatch (S09 wired) --------
-
-
-def test_handle_tool_call_unknown_tool_returns_error_json() -> None:
-    """AC13 (post-S09) — unknown tool name → ``{"error": "unknown tool: ..."}`` JSON.
-
-    S07 stub returned ``{"error": "tool unavailable"}`` for every name; S09
-    wired real dispatch. The original AC intent (unknown name → error JSON,
-    no raise) now lives on the dispatch's unknown-name branch in
-    ``hermes_icm_memory.tools``.
-    """
-    provider = IcmMemoryProvider()
-    out = provider.handle_tool_call("anything-at-all", {})
-    payload = json.loads(out)
-    assert "error" in payload
-    assert "unknown tool" in payload["error"]
-    assert "anything-at-all" in payload["error"]
-
-
-# ---------- AC14: get_tool_schemas dispatch (S09 wired) ----------------------
-
-
-def test_get_tool_schemas_returns_four_schemas() -> None:
-    """AC14 (post-S09) — provider delegates to ``tools.get_tool_schemas``.
-
-    Deeper schema-shape contract lives in ``tests/test_tools.py``; this case
-    only pins that the provider returns four entries with the canonical names.
-    """
-    schemas = IcmMemoryProvider().get_tool_schemas()
-    assert len(schemas) == 4
-    assert [s["name"] for s in schemas] == [
-        "icm_recall",
-        "icm_store",
-        "icm_topics",
-        "icm_health",
-    ]
+# ---------- v0.3 — provider exposes no LLM tool surface ----------------------
+# AC13 / AC14 from the v0.1.x story (handle_tool_call dispatch, get_tool_schemas
+# shape) are obsolete in v0.3. The corresponding invariant tests now live in
+# tests/test_no_tool_surface.py: the provider has no handle_tool_call /
+# get_tool_schemas, and the tools module is deleted.
 
 
 # ---------- Extra coverage: save_config with no hermes_home -----------------
@@ -332,91 +301,32 @@ def test_save_config_without_hermes_home_skips_disk_write() -> None:
 # ---------- Extra coverage: save_config with unwritable hermes_home ----------
 
 
-# ---------- v0.2 — transport (mcp vs cli) lifecycle wiring ------------------
+# ---------- v0.3 — MCP transport removed ------------------------------------
+# v0.2 added a plugin-managed ``icm serve`` daemon (transport: mcp);
+# v0.3 deletes it because hermes-agent v0.3.0+ owns the
+# ``mcp_servers.icm:`` surface natively. The lifecycle tests that pinned
+# the start/stop wiring are obsolete; tests/test_cli_only_transport.py
+# pins the inverse invariant (no transport kwarg, no mcp_* helpers).
 
 
-def test_initialize_starts_mcp_when_transport_mcp(
-    tmp_hermes_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``transport: mcp`` → ``initialize`` calls ``cli_runner.mcp_start``."""
-    from hermes_icm_memory import cli_runner
-
-    calls: list[dict[str, Any]] = []
-
-    def _recorder(*, db_path: Any, use_embeddings: bool) -> None:
-        calls.append({"db_path": db_path, "use_embeddings": use_embeddings})
-
-    monkeypatch.setattr(cli_runner, "mcp_start", _recorder)
-
-    provider = IcmMemoryProvider()
-    provider._config["transport"] = "mcp"
-    provider._config["use_embeddings"] = True
-    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
-
-    assert len(calls) == 1
-    assert calls[0]["use_embeddings"] is True
-    # default-shared mode: db_path is None, threaded through to mcp_start.
-    assert calls[0]["db_path"] is None
-
-
-def test_initialize_no_mcp_when_transport_cli(
-    tmp_hermes_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``transport: cli`` (default) → ``mcp_start`` is NOT called."""
-    from hermes_icm_memory import cli_runner
-
-    calls: list[Any] = []
-
-    def _recorder(**kwargs: Any) -> None:
-        calls.append(kwargs)
-
-    monkeypatch.setattr(cli_runner, "mcp_start", _recorder)
-
-    provider = IcmMemoryProvider()
-    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home)
-
-    assert calls == []
-
-
-def test_initialize_falls_back_to_cli_on_mcp_start_failure(
-    tmp_hermes_home: Path,
+def test_on_session_end_does_not_invoke_subprocess(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``mcp_start`` raises → log WARNING, flip ``_config['transport']`` to 'cli'."""
+    """``on_session_end`` no longer manages an icm-serve daemon (AC1).
+
+    Pins that no AttributeError is raised because someone left a stale
+    ``cli_runner.mcp_stop`` call in the teardown path.
+    """
     from hermes_icm_memory import cli_runner
 
-    def _boom(*, db_path: Any, use_embeddings: bool) -> None:
-        raise OSError("icm serve crashed")
-
-    monkeypatch.setattr(cli_runner, "mcp_start", _boom)
-
-    provider = IcmMemoryProvider()
-    provider._config["transport"] = "mcp"
-    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.provider"):
-        provider.initialize(session_id="s1", hermes_home=tmp_hermes_home)
-
-    assert provider._config["transport"] == "cli"
-    assert any(
-        "mcp_start" in record.message or "transport" in record.message
-        for record in caplog.records
-    )
-
-
-def test_on_session_end_stops_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``on_session_end`` calls ``cli_runner.mcp_stop`` unconditionally (safe no-op)."""
-    from hermes_icm_memory import cli_runner
-
-    calls: list[bool] = []
-
-    def _recorder() -> None:
-        calls.append(True)
-
-    monkeypatch.setattr(cli_runner, "mcp_stop", _recorder)
+    # If a stale mcp_stop reference survived the v0.3 trim, monkeypatching
+    # it would surface — but the attribute itself must be absent now.
+    assert not hasattr(cli_runner, "mcp_stop")
+    assert not hasattr(cli_runner, "mcp_start")
 
     provider = IcmMemoryProvider()
+    # Must not raise even though there is no daemon and no worker yet.
     provider.on_session_end()
-    assert calls == [True]
 
 
 def test_save_config_returns_error_dict_on_oserror(

@@ -7,8 +7,11 @@ mandated by AD-06).
 
 Public surface (frozen post-v1 per NFR-MAINT-1):
 
-* :func:`get_default_schema` — list of twelve schema entries (ten architecture-§10.1
-  defaults + the v0.1.1 additions ``isolated`` and ``use_embeddings``).
+* :func:`get_default_schema` — list of twelve schema entries (ten
+  architecture-§10.1 defaults + the v0.1.1 additions ``isolated`` and
+  ``use_embeddings``). The v0.2 ``transport`` enum was removed in v0.3
+  when the duplicate MCP transport was deleted in favour of the
+  hermes-native ``mcp_servers.icm:`` config (AD-19).
 * :func:`validate` — structural validation, never raises (AD-18).
 * :func:`resolve_db_path` — ``<hermes_home>/icm/<profile>.db`` (AD-05).
 * :func:`mkdir_parent` — idempotent parent-dir creation (AD-06).
@@ -146,28 +149,12 @@ _SCHEMA_ENTRIES: Final[list[dict[str, Any]]] = [
         "description": (
             "If true (default), icm recall uses semantic search via the "
             "multilingual-e5-base ONNX model — the Brief's value prop. "
-            "On Pi-class hardware the model loads ~50s per subprocess call "
-            "(no daemon to amortize), so Pi users should set this to false "
-            "until v0.2's MCP transport (icm serve) lands. Desktop / cloud "
-            "hosts are fine with the default."
-        ),
-    },
-    # ---- v0.2 addition ------------------------------------------------------
-    {
-        "key": "transport",
-        "type": "enum",
-        "default": "cli",
-        "choices": ["cli", "mcp"],
-        "secret": False,
-        "required": False,
-        "description": (
-            "How cli_runner talks to icm. 'cli' (default) spawns a fresh "
-            "subprocess per call — simple, no daemon. 'mcp' spawns one "
-            "long-lived 'icm serve' subprocess per provider lifetime and "
-            "reuses it via JSON-RPC over stdin/stdout, amortizing the "
-            "embedding-model load across calls. Pi-class operators should "
-            "pair 'transport: mcp' with 'use_embeddings: true' to get fast "
-            "semantic recall after the first call's warmup."
+            "On Pi-class hardware the model loads ~50s per subprocess call, "
+            "so Pi operators should set this to false in their plugin config "
+            "and rely on the hermes-native ``mcp_servers.icm:`` daemon (which "
+            "amortizes the model load) for LLM-side semantic recall. The "
+            "plugin's prefetch hot-path then runs sub-100 ms keyword recall "
+            "per turn. Desktop / cloud hosts are fine with the default."
         ),
     },
 ]
@@ -191,10 +178,12 @@ _SCHEMA_BY_KEY: Final[dict[str, dict[str, Any]]] = {
 
 
 def get_default_schema() -> list[dict[str, Any]]:
-    """Return a fresh copy of the ten architecture §10.1 schema entries.
+    """Return a fresh copy of the twelve config schema entries.
 
-    Callers may mutate the returned list and inner dicts without affecting the
-    module-level template (NFR-MAINT-1: schema shape is frozen).
+    Ten architecture §10.1 defaults + the v0.1.1 additions ``isolated`` and
+    ``use_embeddings``. Callers may mutate the returned list and inner dicts
+    without affecting the module-level template (NFR-MAINT-1: schema shape
+    is frozen).
     """
     return copy.deepcopy(_SCHEMA_ENTRIES)
 

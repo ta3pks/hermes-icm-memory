@@ -122,15 +122,19 @@ Adaptations for our case (memory provider rather than hooks-only):
 | AD-18 | **Config schema rejects invalid values structurally** (returning `{"error": "..."}` from `save_config`); never raises. (FR7.) |
 | AD-19 | **Subprocess args always list-form (`["icm", "store", "-t", topic, ...]`), never string concat** | NFR-SEC-3. |
 | AD-20 | **Periodic-progress trigger fires every N turns** (default `N=20`, configurable), counted per-session by the provider instance. Resets on `on_session_end`. |
+| AD-21 | **Hermes-native MCP is the only LLM tool surface (v0.3).** The plugin no longer exposes `icm_recall` / `icm_store` / `icm_topics` / `icm_health` to the LLM. Operators register `icm serve` under `mcp_servers.icm:` in `~/.hermes/config.yaml`; hermes-agent v0.3.0+ auto-discovers `icm_memory_*` tools and registers them alongside built-ins. The plugin's value-add is reduced to lifecycle hooks (auto-prefetch, auto-store) — the things only it can do. (Supersedes AD-D1; closes the duplicate-transport failure class that caused the 2026-05-06 Pi outage.) |
+| AD-22 | **Plugin-internal recall uses CLI subprocess only (v0.3).** `prefetch()` calls `cli_runner.run_recall()` via fresh `icm` subprocess per turn. With `use_embeddings: false` (the recommended Pi setting for the prefetch hot-path) each call is < 100 ms. Semantic recall on demand flows through hermes' long-lived `icm serve` daemon (AD-21). The `transport` config field and the `cli_runner` MCP daemon section are deleted. |
+| AD-23 | **WARNING logs include exception text inline via `%r` (v0.3).** The default Python logging formatter does not render `extra={...}`. Carries the structured-log dict (for JSON formatters) AND inlines the exception text in the format string itself so a default-formatter log surface still surfaces the cause. Pre-v0.3 the structured-only logs masked the `mcp_start` failure that triggered the silent degrade-to-cli on the 2026-05-06 Pi outage. |
 
 ### 3.3 Deferred (post-v1)
 
 | ID    | Decision                                                                  | Trigger to revisit                                          |
 |-------|---------------------------------------------------------------------------|-------------------------------------------------------------|
-| AD-D1 | MCP transport via `icm serve` (replaces `cli_runner.py` internals)         | v2 release; no public API change required (NFR-MAINT-1/2).  |
+| AD-D1 | ~~MCP transport via `icm serve`~~ — **superseded by AD-21 (hermes-native MCP).** | n/a |
 | AD-D2 | Bidirectional `icm learn` / `icm feedback-record` integration              | After v1 adoption; needs UX design.                         |
 | AD-D3 | Read-only / audit mode (`icm-recall-only` lite)                            | Demand-driven.                                              |
 | AD-D4 | Companion shell CLI (`hermes-icm`) for out-of-session recall queries       | Demand-driven.                                              |
+| AD-D5 | Shared-DB writes against the canonical icm file (concurrent-writer semantics with editors) | Demand-driven; v0.4+. |
 
 ### 3.4 Cascading implications
 

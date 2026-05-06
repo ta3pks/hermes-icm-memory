@@ -5,6 +5,120 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-05-07
+
+Architecture pivot — hermes-native MCP for tools, lifecycle-only plugin.
+Hermes-Agent v0.3.0 (March 17, 2026) shipped first-class
+`mcp_servers.<name>:` config; this release deletes the plugin's duplicate
+`transport: mcp` machinery so hermes is the single source of truth for
+`icm` tool exposure to the LLM, and the plugin's value-add is reduced to
+what only it can do — auto-prefetch on prompt-submit and auto-store on
+triggered turns.
+
+The non-negotiable: **auto-injection of recalled memories into the
+system-prompt prepend is preserved** — `prefetch()` + `system_prompt_block()`
+stay. They now run via fresh keyword-only `icm` subprocesses on the hot
+path (sub-100 ms on Pi); LLM-driven semantic recall comes from
+hermes-native `mcp_servers.icm:` (long-lived `icm serve` daemon, warm
+embedding-model cache).
+
+### Removed
+
+- **`transport` config key** — the v0.2 enum (`cli` / `mcp`) is gone.
+  v0.2-era configs that still carry `transport: ...` validate as a pass-
+  through unknown key (forward-compat); the runtime ignores it.
+- **MCP transport in `cli_runner`** — `mcp_start`, `mcp_stop`, `_McpDaemon`,
+  `_mcp_call`, `_mcp_recall` / `_mcp_store` / `_mcp_topics` / `_mcp_health`
+  and the JSON-RPC plumbing (`_MCP_PROTOCOL_VERSION`, `_MCP_TOOL_*`,
+  `_MCP_MAX_RESPONSE_LINES`, the lifecycle lock, the `atexit` backstop)
+  are deleted. `cli_runner` now only uses `subprocess.run` for one-shot
+  CLI invocations (no `subprocess.Popen`). The `transport` kwarg on
+  `run_recall` / `run_store` / `run_topics` / `run_health` is removed.
+- **LLM-tool surface (`tools.py`)** — `IcmMemoryProvider.handle_tool_call`
+  and `IcmMemoryProvider.get_tool_schemas` are removed; the entire
+  `hermes_icm_memory/tools.py` module is deleted along with
+  `tests/test_tools.py` and `tests/test_cli_runner_mcp.py`. Tool exposure
+  to the LLM is now hermes-native via `mcp_servers.icm:` (auto-discovers
+  `icm_memory_recall`, `icm_memory_store`, `icm_memory_list_topics`,
+  `icm_memory_health`).
+- **`hooks.WorkerState.transport` field** — single CLI write path; no
+  branch in `worker_loop` / `ensure_worker` / `run_prefetch`.
+- **`provider.initialize` MCP startup branch** and **`provider.on_session_end`
+  `cli_runner.mcp_stop()` call** are gone.
+
+### Added
+
+- **`IcmMemoryProvider.shutdown()`** — Hermes lifecycle hook (no-op in
+  v0.3, no daemon to manage). Defined explicitly so hermes-agent's
+  `memory_manager` no longer logs
+  `'IcmMemoryProvider' object has no attribute 'shutdown'` on every
+  gateway restart.
+- **Inline `%r` in WARNING log messages.** Every public boundary that
+  catches and degrades (`hooks.run_prefetch`, `hooks.submit_triggers`,
+  `hooks.worker_loop`, `provider.prefetch`, `provider.sync_turn`,
+  `provider.on_session_end`, `provider.shutdown`,
+  `provider.initialize`, `provider.save_config`, `provider.is_available`)
+  now includes the exception text in the format string itself (e.g.
+  `"prefetch failed: %r"` with `exc` as positional arg) **in addition to**
+  the existing `extra={"err": repr(exc), ...}`. The default Python
+  logging formatter does not render `extra={...}` — the Pi outage on
+  2026-05-06 was undebuggable until this was hand-patched. AD-13's
+  structured logs stay (for operators using JSON log formatters), but
+  the human-readable exception text is now also present.
+- **New invariant tests** —
+  `tests/test_no_tool_surface.py` pins that the provider has no
+  `handle_tool_call` / `get_tool_schemas` and `tools.py` is deleted from
+  the package; `tests/test_cli_only_transport.py` pins that none of the
+  `run_*` helpers carries a `transport=` kwarg, no `mcp_*` symbols
+  remain, and `subprocess.Popen` is absent from the source.
+
+### Changed
+
+- **`config.get_default_schema()` returns twelve entries** (down from 13);
+  the v0.2 `transport` enum is removed (AC2).
+- **`hooks.run_prefetch` always uses CLI subprocess.** With
+  `use_embeddings: false` (the recommended Pi setting for the prefetch
+  hot-path) each call is < 100 ms — fine for the prompt-prepend hot
+  path. Semantic recall on demand is delivered by hermes-native
+  `mcp_servers.icm:` when the LLM calls `icm_memory_recall`.
+
+### Migration from v0.2
+
+1. **Remove `transport` from `plugins.hermes-icm-memory:`** in
+   `~/.hermes/config.yaml` (it's now ignored; passes through as an
+   unknown key, no error).
+
+2. **Add `mcp_servers.icm:`** to `~/.hermes/config.yaml` if not already
+   present:
+
+   ```yaml
+   mcp_servers:
+     icm:
+       command: icm
+       args: [serve, --no-embeddings]   # or omit --no-embeddings if your hardware has fast model load
+       timeout: 120
+       connect_timeout: 30
+   ```
+
+   Hermes auto-discovers `icm_memory_recall` / `icm_memory_store` /
+   `icm_memory_list_topics` / `icm_memory_health` and registers them
+   alongside built-ins.
+
+3. **Restart hermes-gateway.** The LLM now uses the hermes-native
+   `icm_memory_*` tools (prefixed with `icm_memory_` per hermes
+   convention). Auto-injection on prompt-submit continues unchanged via
+   the plugin's lifecycle hooks (`prefetch` → `system_prompt_block`).
+
+### Limitations / Out of scope
+
+- Honcho memory provider integration (unrelated; hermes 0.3.0 ships its
+  own).
+- Replacing the bounded-queue worker with hermes' own async write
+  infrastructure (potential v0.4).
+- A "shared icm serve" mode where the plugin reuses hermes' MCP-managed
+  daemon for prefetch (would couple plugin to hermes internals; rejected
+  — keyword-only CLI is fast enough on Pi).
+
 ## [0.2.0] — 2026-05-06
 
 `icm-serve` MCP transport — amortize the embedding-model load across calls.

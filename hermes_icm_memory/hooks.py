@@ -10,7 +10,10 @@ Architecture invariants:
   the documented degraded shape. No exception ever propagates into the
   Hermes turn loop.
 * AD-13 — module-level ``logger = logging.getLogger(__name__)``; structured
-  ``extra={...}`` dicts on every WARNING / CRITICAL.
+  ``extra={...}`` dicts on every WARNING / CRITICAL **and** the exception
+  text inlined into the format string via ``%r`` so the default Python
+  formatter (which drops ``extra={...}``) still surfaces it (AC8 — the
+  Pi outage on 2026-05-06 was undebuggable until this was hand-patched).
 
 Worker model (locked by planner memo `01KQWT5T9EEEFGQYWKGVQPR5G3`):
 
@@ -82,10 +85,6 @@ class WorkerState:
     (``submit_triggers``) and the consumer (``worker_loop``) both read+write
     a subset, and grouping them here removes scattered instance attributes
     from :class:`IcmMemoryProvider`.
-
-    ``transport`` is captured at worker-spawn time (the worker thread runs
-    detached from the provider's config dict, so we hand it the value rather
-    than re-read on every drain).
     """
 
     write_queue: queue.Queue[WriteTask] | None = None
@@ -95,7 +94,6 @@ class WorkerState:
     respawn_count: int = 0
     writes_disabled: bool = False
     turn_index: int = 0
-    transport: str = "cli"
 
 
 # ---------- Worker loop ------------------------------------------------------
@@ -108,7 +106,6 @@ def worker_loop(
     timeout_ms: int,
     overflow_burst: list[bool],
     stop_event: threading.Event,
-    transport: str = "cli",
 ) -> None:
     """Daemon worker body. FIFO drain via blocking ``get`` with a 100 ms tick.
 
@@ -116,10 +113,6 @@ def worker_loop(
     surface) and ``Exception`` (defensive — must not let the thread die).
     Each successful drain clears ``overflow_burst[0]`` so the next overflow
     burst gets exactly one WARNING.
-
-    ``transport`` is captured by the producer (provider's ``_ensure_worker``)
-    and pinned for the worker's lifetime — re-reading per-task would race
-    against config edits.
     """
     while not stop_event.is_set():
         try:
@@ -134,16 +127,17 @@ def worker_loop(
                 db_path,
                 timeout_ms,
                 keywords=",".join(task.keywords) if task.keywords else None,
-                transport=transport,
             )
         except ICMError as exc:
             logger.warning(
-                "worker: store failed",
+                "worker: store failed: %r",
+                exc,
                 extra={"err": repr(exc), "topic": task.topic},
             )
         except Exception as exc:  # defensive — see docstring
             logger.warning(
-                "worker: unexpected error",
+                "worker: unexpected error: %r",
+                exc,
                 extra={"err": repr(exc), "topic": task.topic},
             )
         finally:
@@ -160,7 +154,6 @@ def ensure_worker(
     queue_size: int,
     db_path: Path | None,
     write_timeout_ms: int,
-    transport: str = "cli",
 ) -> bool:
     """Create the queue + spawn the worker on first need; respawn if dead.
 
@@ -173,8 +166,6 @@ def ensure_worker(
 
     if state.write_queue is None:
         state.write_queue = queue.Queue(maxsize=queue_size)
-
-    state.transport = transport
 
     if state.worker is None:
         state.worker = _spawn_worker(state, db_path, write_timeout_ms)
@@ -214,7 +205,6 @@ def _spawn_worker(
             "timeout_ms": timeout_ms,
             "overflow_burst": state.overflow_burst,
             "stop_event": state.stop_event,
-            "transport": state.transport,
         },
         name="hermes-icm-writer",
         daemon=True,
@@ -234,21 +224,24 @@ def run_prefetch(
     timeout_ms: int,
     cache: dict[int, list[dict[str, Any]]],
     use_embeddings: bool = False,
-    transport: str = "cli",
 ) -> list[dict[str, Any]]:
     """Run a single recall, cache hits keyed by ``hash(query)``.
 
     On any :class:`ICMError` (or unexpected ``Exception``), returns ``[]``
     and stores ``[]`` in the cache so :func:`format_block` does not retry.
-    Logs WARNING with ``extra={"err": ..., "query_hash": ...}``. **Never
-    raises.**
+    Logs WARNING with ``extra={"err": ..., "query_hash": ...}`` and inlines
+    the exception via ``%r`` so the default formatter surfaces it.
+    **Never raises.**
 
     v0.1.1 — ``db_path`` may be ``None`` (default-shared mode lets ``icm``
     use its canonical OS-default DB) and ``use_embeddings`` controls the
     ``--no-embeddings`` flag in ``cli_runner.run_recall``.
 
-    v0.2 — ``transport`` selects between the fresh-subprocess CLI path and
-    the long-lived ``icm serve`` daemon (MCP) for amortized embedding loads.
+    v0.3 — single CLI subprocess path. The semantic-recall fast-path
+    previously offered by ``transport: mcp`` is now delivered by
+    hermes-native ``mcp_servers.icm:`` (LLM-side ``icm_memory_recall``),
+    so the plugin's prefetch hot-path uses fresh keyword-only subprocesses
+    on Pi (sub-100 ms per call).
     """
     key = hash(query)
     try:
@@ -258,18 +251,19 @@ def run_prefetch(
             db_path=db_path,
             timeout_ms=timeout_ms,
             use_embeddings=use_embeddings,
-            transport=transport,
         )
     except ICMError as exc:
         logger.warning(
-            "prefetch: recall failed; returning empty",
+            "prefetch: recall failed; returning empty: %r",
+            exc,
             extra={"err": repr(exc), "query_hash": key},
         )
         cache[key] = []
         return []
     except Exception as exc:  # defensive boundary
         logger.warning(
-            "prefetch: unexpected error",
+            "prefetch: unexpected error: %r",
+            exc,
             extra={"err": repr(exc), "query_hash": key},
         )
         cache[key] = []
@@ -344,7 +338,8 @@ def submit_triggers(
         )
     except Exception as exc:
         logger.warning(
-            "sync_turn: detect_triggers raised; dropping turn",
+            "sync_turn: detect_triggers raised; dropping turn: %r",
+            exc,
             extra={"err": repr(exc)},
         )
         return
@@ -362,7 +357,8 @@ def submit_triggers(
             _warn_overflow_once(state)
         except Exception as exc:  # defensive — never raise into the turn
             logger.warning(
-                "sync_turn: enqueue raised; dropping task",
+                "sync_turn: enqueue raised; dropping task: %r",
+                exc,
                 extra={"err": repr(exc), "topic": topic},
             )
 
