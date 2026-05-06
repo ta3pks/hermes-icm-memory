@@ -175,9 +175,10 @@ def _use_embeddings(provider: IcmMemoryProvider) -> bool:
     """Resolve the ``use_embeddings`` flag from provider config (default ``False``).
 
     v0.1.1: ``False`` keeps the hot path Pi-safe; opt-in via provider config.
+    Non-bool values (e.g. from a corrupt sidecar) silently fall back to ``False``.
     """
     raw = _provider_config(provider).get("use_embeddings", False)
-    return bool(raw) if isinstance(raw, bool) else False
+    return raw if isinstance(raw, bool) else False
 
 
 def _recall_limit(provider: IcmMemoryProvider, override: object) -> int:

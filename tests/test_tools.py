@@ -54,14 +54,6 @@ def _read_provider() -> IcmMemoryProvider:
     return p
 
 
-def _isolated_read_provider() -> IcmMemoryProvider:
-    """Read-path provider with a concrete ``_db_path`` (legacy isolated mode)."""
-    p = IcmMemoryProvider()
-    p._init_args = ("test-session", "/tmp/test-hermes-home", "default")
-    p._db_path = _FAKE_DB
-    return p
-
-
 def _provider_with_queue(qsize: int = 8) -> IcmMemoryProvider:
     """Fresh provider with a bounded write queue + ``_db_path`` attached.
 
