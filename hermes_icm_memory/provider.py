@@ -20,7 +20,7 @@ import threading
 from pathlib import Path
 from typing import Any, Final
 
-from . import config, hooks, tools
+from . import cli_runner, config, hooks, tools
 
 __all__ = ["IcmMemoryProvider"]
 
@@ -130,6 +130,22 @@ class IcmMemoryProvider:
         self._session_id = session_id
         self._init_args = args_key
 
+        # v0.2: when transport=mcp, lazy-spawn ``icm serve``. Failure flips the
+        # transport back to ``cli`` for the rest of the lifetime so the read
+        # path keeps working (degrade-to-cli, not degrade-to-empty).
+        if self._config_str("transport") == "mcp":
+            try:
+                cli_runner.mcp_start(
+                    db_path=self._db_path,
+                    use_embeddings=self._config_bool("use_embeddings"),
+                )
+            except Exception as exc:  # noqa: BLE001 — every failure degrades
+                logger.warning(
+                    "initialize: mcp_start failed; falling back to transport=cli",
+                    extra={"err": repr(exc)},
+                )
+                self._config["transport"] = "cli"
+
     # ------------------------------------------------------------------ config
 
     def get_config_schema(self) -> list[dict[str, Any]]:
@@ -204,6 +220,11 @@ class IcmMemoryProvider:
         """Read a bool config value (caller-saved override or schema default)."""
         return bool(self._config.get(key, _DEFAULT_CONFIG[key]))
 
+    def _config_str(self, key: str) -> str:
+        """Read a string-shaped config value (enum or string-typed key)."""
+        value = self._config.get(key, _DEFAULT_CONFIG[key])
+        return str(value) if value is not None else ""
+
     # State exposed on the provider (read-only properties + one mutable list).
 
     @property
@@ -240,6 +261,7 @@ class IcmMemoryProvider:
             queue_size=self._config_int("sync_write_queue_size"),
             db_path=self._db_path,
             write_timeout_ms=self._config_int("command_timeout_write_ms"),
+            transport=self._config_str("transport"),
         )
 
     # ------------------------------------------------------------------ prefetch
@@ -265,6 +287,7 @@ class IcmMemoryProvider:
                 timeout_ms=self._config_int("command_timeout_read_ms"),
                 cache=self._prefetch_cache,
                 use_embeddings=self._config_bool("use_embeddings"),
+                transport=self._config_str("transport"),
             )
         except Exception as exc:  # belt-and-braces; helper already swallows
             logger.warning(
@@ -351,5 +374,13 @@ class IcmMemoryProvider:
         except Exception as exc:  # defensive boundary
             logger.warning(
                 "on_session_end: outer boundary caught",
+                extra={"err": repr(exc)},
+            )
+        # v0.2 — unconditional MCP teardown. Safe no-op when transport=cli.
+        try:
+            cli_runner.mcp_stop()
+        except Exception as exc:  # defensive — teardown must never raise
+            logger.warning(
+                "on_session_end: mcp_stop raised",
                 extra={"err": repr(exc)},
             )

@@ -140,6 +140,7 @@ def test_recall_returns_json_string_with_hits_key(
         db_path: Any,
         timeout_ms: int,
         use_embeddings: bool = False,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -320,7 +321,9 @@ def test_topics_returns_topics_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC8 — cli_runner.run_topics list passes through wrapped in {"topics": ...}."""
     topics_list = [{"topic": "preferences"}, {"topic": "errors-resolved"}]
 
-    def _fake_run_topics(db_path: Any, timeout_ms: int) -> list[dict[str, Any]]:
+    def _fake_run_topics(
+        db_path: Any, timeout_ms: int, *, transport: str = "cli"
+    ) -> list[dict[str, Any]]:
         return topics_list
 
     monkeypatch.setattr(tools, "run_topics", _fake_run_topics)
@@ -369,7 +372,11 @@ def test_health_no_topic(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
     def _fake_run_health(
-        db_path: Any, timeout_ms: int, topic: str | None = None
+        db_path: Any,
+        timeout_ms: int,
+        topic: str | None = None,
+        *,
+        transport: str = "cli",
     ) -> dict[str, Any]:
         captured["topic"] = topic
         return {"stale": "0", "total": "12"}
@@ -393,7 +400,11 @@ def test_health_with_topic_arg(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
     def _fake_run_health(
-        db_path: Any, timeout_ms: int, topic: str | None = None
+        db_path: Any,
+        timeout_ms: int,
+        topic: str | None = None,
+        *,
+        transport: str = "cli",
     ) -> dict[str, Any]:
         captured["topic"] = topic
         return {"stale": "1"}
@@ -593,6 +604,7 @@ def test_recall_rejects_bool_limit_falls_back_to_default(
         db_path: Any,
         timeout_ms: int,
         use_embeddings: bool = False,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -615,6 +627,7 @@ def test_recall_uses_configured_timeout(monkeypatch: pytest.MonkeyPatch) -> None
         db_path: Any,
         timeout_ms: int,
         use_embeddings: bool = False,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -641,6 +654,7 @@ def test_recall_uses_configured_recall_limit(
         db_path: Any,
         timeout_ms: int,
         use_embeddings: bool = False,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -712,18 +726,25 @@ def test_read_handlers_proceed_when_initialized_default_shared(
         db_path: Any,
         timeout_ms: int,
         use_embeddings: bool = False,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
         captured["db_path"] = db_path
         return [{"id": "m1"}]
 
-    def _fake_run_topics(db_path: Any, timeout_ms: int) -> list[dict[str, Any]]:
+    def _fake_run_topics(
+        db_path: Any, timeout_ms: int, *, transport: str = "cli"
+    ) -> list[dict[str, Any]]:
         captured["db_path"] = db_path
         return [{"topic": "p"}]
 
     def _fake_run_health(
-        db_path: Any, timeout_ms: int, topic: str | None = None
+        db_path: Any,
+        timeout_ms: int,
+        topic: str | None = None,
+        *,
+        transport: str = "cli",
     ) -> dict[str, Any]:
         captured["db_path"] = db_path
         return {"stale": "0"}
@@ -756,6 +777,7 @@ def test_recall_threads_use_embeddings_from_provider_config(
         db_path: Any,
         timeout_ms: int,
         use_embeddings: bool = True,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -887,6 +909,7 @@ def test_corrupt_config_does_not_crash_read_handlers(
         db_path: Any,
         timeout_ms: int,
         use_embeddings: bool = False,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:

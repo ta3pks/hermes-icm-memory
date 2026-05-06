@@ -5,6 +5,96 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-05-06
+
+`icm-serve` MCP transport — amortize the embedding-model load across calls.
+Pi-class hosts can now run semantic recall: first call ~50 s (warmup),
+every subsequent recall ~50 ms.
+
+### Added
+
+- New config key `transport` (enum, default `"cli"`, choices
+  `["cli", "mcp"]`). `cli` keeps the v0.1.x fresh-subprocess path;
+  `mcp` spawns one long-lived `icm serve` subprocess per provider
+  lifetime and reuses it via JSON-RPC over stdin/stdout.
+- New module-level helpers `cli_runner.mcp_start(db_path, use_embeddings)`
+  and `cli_runner.mcp_stop()`. Provider's `initialize` calls
+  `mcp_start` when `transport: mcp`; `on_session_end` always calls
+  `mcp_stop` (no-op when transport is `cli`). An `atexit` hook is a
+  belt-and-braces backstop so torn-down sessions never leak orphan
+  `icm serve` processes.
+- New integration test `tests/integration/test_real_icm_serve.py` —
+  spawns a real `icm serve` daemon and asserts two consecutive recalls
+  reuse the same subprocess (gated on `shutil.which("icm")`).
+- `cli_runner.run_recall` / `run_topics` / `run_health` / `run_store`
+  accept a `transport: str = "cli"` keyword. The MCP path internally
+  dispatches to `_mcp_recall` / `_mcp_topics` / `_mcp_health` /
+  `_mcp_store` (all private to `cli_runner.py`, AD-12 unchanged).
+
+### Changed
+
+- `provider.initialize` now branches on `_config_str("transport")`. If
+  `"mcp"`, it spawns the daemon during initialize so the embedding-model
+  warmup happens once at startup rather than on the first recall. On
+  `mcp_start` failure the provider logs a WARNING and flips
+  `_config["transport"]` to `"cli"` for the rest of the lifetime —
+  graceful degrade-to-cli, never degrade-to-empty.
+- `hooks.WorkerState` gained a `transport: str = "cli"` field captured at
+  worker-spawn time so the daemon worker forwards the transport to
+  `cli_runner.run_store`. Worker re-reads happen at spawn, not per-task,
+  so a config edit mid-session won't race the worker.
+
+### Failure-mode policy (MCP transport)
+
+- **Daemon dies mid-call** → `cli_runner` logs a WARNING, respawns once
+  with the cached args, retries the request.
+- **Second consecutive death** → `_mcp_disabled` sentinel set, every
+  subsequent `_mcp_*` call short-circuits to `ICMNotFoundError`. Upstream
+  `tools._run_read` already catches `ICMError` and degrades to the
+  documented empty-payload shape; `provider.prefetch` returns `""`.
+- **`mcp_start` fails at initialize time** → provider falls back to
+  `transport: cli` and continues operating. Operators see one WARNING
+  per session; no exception escapes the provider boundary (AD-07
+  invariant preserved).
+- **JSON-RPC response never arrives** → `ICMTimeoutError` after the
+  per-call `timeout_ms` budget elapses; same upstream degrade as a
+  CLI-path timeout.
+
+### Pi-friendly recipe
+
+Add this to your Hermes memory-provider config to get fast semantic
+recall on Pi-class hardware (4 GB Raspberry Pi 4 or similar):
+
+```yaml
+transport: mcp
+use_embeddings: true
+```
+
+First recall: ~50 s (model cold-start). Every subsequent recall: <1 s.
+Operators on desktop / cloud can leave both settings at default —
+`transport: cli` + `use_embeddings: true` already gets them semantic
+recall with no behavioural change from v0.1.1.
+
+### Migration from v0.1.1
+
+No action required. Default settings (`transport: cli`,
+`use_embeddings: true`, `isolated: false`) preserve v0.1.1 behaviour
+bit-for-bit.
+
+### Limitations / Out of scope
+
+- `transport: mcp` works for both reads (recall / topics / health /
+  prefetch) and writes (`icm_memory_store` over MCP). However, in the
+  default-shared mode (`isolated: false`) the worker still no-ops
+  because `_ensure_worker` short-circuits when `_db_path is None` —
+  carry-over from v0.1.1's "shared-DB writes need a v0.3 review"
+  position. Operators wanting MCP-mediated writes today should set
+  `isolated: true`.
+- Auto-detection of Pi-class hardware (to default to `mcp` there) is a
+  v0.3 concern.
+- Windows is unsupported. `icm serve` spawning + signal handling tested
+  on Linux + macOS only.
+
 ## [0.1.1] — 2026-05-06
 
 Pi-deployment fixes + restoration of the brief's "shared memory with editors"

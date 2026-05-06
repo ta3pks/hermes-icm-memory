@@ -67,6 +67,8 @@ def test_overflow_fifo_warning_no_exception(
         timeout_ms: int,
         keywords: str | None = None,
         raw: str | None = None,
+        *,
+        transport: str = "cli",
     ) -> None:
         # Block the worker until producers finish + we explicitly release.
         # 30 s ceiling guards against test-author errors leaving the gate shut.
@@ -77,7 +79,7 @@ def test_overflow_fifo_warning_no_exception(
         # assertion (e) `len(hits) == accepted` would otherwise fail spuriously.
         real_run_store(
             topic, content, importance, db_path, timeout_ms,
-            keywords=keywords, raw=raw,
+            keywords=keywords, raw=raw, transport=transport,
         )
         processed.append(content)
 

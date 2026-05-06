@@ -332,6 +332,93 @@ def test_save_config_without_hermes_home_skips_disk_write() -> None:
 # ---------- Extra coverage: save_config with unwritable hermes_home ----------
 
 
+# ---------- v0.2 — transport (mcp vs cli) lifecycle wiring ------------------
+
+
+def test_initialize_starts_mcp_when_transport_mcp(
+    tmp_hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``transport: mcp`` → ``initialize`` calls ``cli_runner.mcp_start``."""
+    from hermes_icm_memory import cli_runner
+
+    calls: list[dict[str, Any]] = []
+
+    def _recorder(*, db_path: Any, use_embeddings: bool) -> None:
+        calls.append({"db_path": db_path, "use_embeddings": use_embeddings})
+
+    monkeypatch.setattr(cli_runner, "mcp_start", _recorder)
+
+    provider = IcmMemoryProvider()
+    provider._config["transport"] = "mcp"
+    provider._config["use_embeddings"] = True
+    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
+
+    assert len(calls) == 1
+    assert calls[0]["use_embeddings"] is True
+    # default-shared mode: db_path is None, threaded through to mcp_start.
+    assert calls[0]["db_path"] is None
+
+
+def test_initialize_no_mcp_when_transport_cli(
+    tmp_hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``transport: cli`` (default) → ``mcp_start`` is NOT called."""
+    from hermes_icm_memory import cli_runner
+
+    calls: list[Any] = []
+
+    def _recorder(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(cli_runner, "mcp_start", _recorder)
+
+    provider = IcmMemoryProvider()
+    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home)
+
+    assert calls == []
+
+
+def test_initialize_falls_back_to_cli_on_mcp_start_failure(
+    tmp_hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``mcp_start`` raises → log WARNING, flip ``_config['transport']`` to 'cli'."""
+    from hermes_icm_memory import cli_runner
+
+    def _boom(*, db_path: Any, use_embeddings: bool) -> None:
+        raise OSError("icm serve crashed")
+
+    monkeypatch.setattr(cli_runner, "mcp_start", _boom)
+
+    provider = IcmMemoryProvider()
+    provider._config["transport"] = "mcp"
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.provider"):
+        provider.initialize(session_id="s1", hermes_home=tmp_hermes_home)
+
+    assert provider._config["transport"] == "cli"
+    assert any(
+        "mcp_start" in record.message or "transport" in record.message
+        for record in caplog.records
+    )
+
+
+def test_on_session_end_stops_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``on_session_end`` calls ``cli_runner.mcp_stop`` unconditionally (safe no-op)."""
+    from hermes_icm_memory import cli_runner
+
+    calls: list[bool] = []
+
+    def _recorder() -> None:
+        calls.append(True)
+
+    monkeypatch.setattr(cli_runner, "mcp_stop", _recorder)
+
+    provider = IcmMemoryProvider()
+    provider.on_session_end()
+    assert calls == [True]
+
+
 def test_save_config_returns_error_dict_on_oserror(
     tmp_hermes_home: Path,
     monkeypatch: pytest.MonkeyPatch,
