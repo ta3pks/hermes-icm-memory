@@ -23,6 +23,10 @@ _PLUGIN_DIR = Path(__file__).parent
 if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 
-from hermes_icm_memory import IcmMemoryProvider, __version__, register  # noqa: E402  # path mutation above must precede the import
+from hermes_icm_memory import (  # noqa: E402, I001  # path mutation above must precede the import
+    IcmMemoryProvider,
+    __version__,
+    register,
+)
 
 __all__ = ["IcmMemoryProvider", "__version__", "register"]
