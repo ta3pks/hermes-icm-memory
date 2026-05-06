@@ -230,7 +230,14 @@ def test_store_enqueues_and_returns_immediately() -> None:
 
 
 def test_store_p95_under_5ms() -> None:
-    """AC5 latency clause — handler completes p95 < 5 ms across 200 runs."""
+    """AC5 latency clause — handler completes p95 < 5 ms (relaxed to 25 ms ceiling on Pi).
+
+    Generous threshold per team-lead matches the sibling
+    ``test_sync_turn_p95_under_5ms`` in ``tests/test_hooks.py``: the 5 ms NFR-PERF-1
+    target is the documented design goal; this ceiling guards against gross perf
+    cliffs (e.g. accidentally blocking on a subprocess call from the hot path)
+    while staying robust to Pi-class CI under parallel test load.
+    """
     provider = _provider_with_queue(qsize=512)
 
     elapsed: list[float] = []
@@ -244,7 +251,7 @@ def test_store_p95_under_5ms() -> None:
 
     elapsed.sort()
     p95 = elapsed[int(len(elapsed) * 0.95) - 1]
-    assert p95 < 5.0, f"icm_store p95 was {p95:.2f}ms (expected < 5ms)"
+    assert p95 < 25.0, f"icm_store p95 was {p95:.2f}ms (expected < 25ms ceiling)"
 
 
 # =============================================================================
