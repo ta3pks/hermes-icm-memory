@@ -40,7 +40,7 @@ import re
 import subprocess  # AD-12: ONLY import in the package.
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -373,33 +373,48 @@ class _McpDaemon:
     Only one of these is alive at a time, held by the module-level
     :data:`_mcp_state` slot. A new ``mcp_start`` after ``mcp_stop`` produces
     a fresh instance; the per-process ``atexit`` hook calls ``mcp_stop``.
+
+    Concurrency note: the module-level :data:`_mcp_lifecycle_lock` is the
+    *single* lock guarding stdin/stdout I/O + lifecycle transitions; the
+    per-daemon ``next_id`` counter is therefore advanced under that lock
+    too, so we don't need a separate per-daemon lock.
     """
 
     proc: subprocess.Popen[str]
     cached_db_path: Path | None
     cached_use_embeddings: bool
-    lock: threading.Lock = field(default_factory=threading.Lock)
     next_id: int = 1
 
 
-# Module-level holders. Functions read/write through narrow accessors so the
-# (rare) test reset path stays predictable.
+# Module-level holders. All state mutations (start/stop/respawn/disabled flag)
+# AND the per-call stdin write + stdout read happen under the lifecycle lock,
+# so two threads racing through ``_mcp_call`` can't double-respawn or read
+# each other's responses. The lock serialises the daemon's request/response
+# cycle — fine for v0.2 because each ``icm serve`` call is request/response
+# and concurrent callers are inherently sequential against one stdin pipe.
+_mcp_lifecycle_lock: threading.Lock = threading.Lock()
 _mcp_state: _McpDaemon | None = None
 _mcp_disabled: bool = False
 _mcp_atexit_registered: bool = False
 
 
 def _mcp_reset_state_for_tests() -> None:
-    """Test-only helper: clear daemon state without sending JSON-RPC."""
+    """Test-only helper: clear daemon state without sending JSON-RPC.
+
+    Held under :data:`_mcp_lifecycle_lock` — a test-side reset shouldn't
+    be able to race a producer thread that's mid-call against the daemon
+    being reset.
+    """
     global _mcp_state, _mcp_disabled
-    if _mcp_state is not None:
-        with contextlib.suppress(Exception):
-            if _mcp_state.proc.stdin is not None:
-                _mcp_state.proc.stdin.close()
-        with contextlib.suppress(Exception):
-            _mcp_state.proc.terminate()
-    _mcp_state = None
-    _mcp_disabled = False
+    with _mcp_lifecycle_lock:
+        if _mcp_state is not None:
+            with contextlib.suppress(Exception):
+                if _mcp_state.proc.stdin is not None:
+                    _mcp_state.proc.stdin.close()
+            with contextlib.suppress(Exception):
+                _mcp_state.proc.terminate()
+        _mcp_state = None
+        _mcp_disabled = False
 
 
 def mcp_start(*, db_path: Path | None, use_embeddings: bool) -> None:
@@ -410,40 +425,45 @@ def mcp_start(*, db_path: Path | None, use_embeddings: bool) -> None:
     Resets the ``_mcp_disabled`` sentinel: an explicit start clears the
     "give up" flag so an operator-driven restart can recover from a
     double-death scenario.
+
+    Held under :data:`_mcp_lifecycle_lock` so a concurrent ``_mcp_call``
+    can't observe a half-spawned daemon mid-handshake.
     """
     global _mcp_state, _mcp_disabled, _mcp_atexit_registered
-    _mcp_disabled = False
-    if _mcp_state is not None and _mcp_state.proc.poll() is None:
-        # Already alive; treat as no-op so initialize stays idempotent.
-        return
-    _mcp_state = _mcp_spawn(db_path=db_path, use_embeddings=use_embeddings)
-    if not _mcp_atexit_registered:
-        atexit.register(mcp_stop)
-        _mcp_atexit_registered = True
+    with _mcp_lifecycle_lock:
+        _mcp_disabled = False
+        if _mcp_state is not None and _mcp_state.proc.poll() is None:
+            # Already alive; treat as no-op so initialize stays idempotent.
+            return
+        _mcp_state = _mcp_spawn(db_path=db_path, use_embeddings=use_embeddings)
+        if not _mcp_atexit_registered:
+            atexit.register(mcp_stop)
+            _mcp_atexit_registered = True
 
 
 def mcp_stop() -> None:
-    """Tear down the daemon. Safe to call when no daemon is running."""
+    """Tear down the daemon. Safe to call when no daemon is running.
+
+    Held under :data:`_mcp_lifecycle_lock` so it can't race a concurrent
+    ``_mcp_call`` mid-write.
+    """
     global _mcp_state
-    daemon = _mcp_state
-    _mcp_state = None
-    if daemon is None:
-        return
-    try:
-        if daemon.proc.stdin is not None:
-            daemon.proc.stdin.close()
-    except Exception as exc:  # noqa: BLE001 — defensive teardown
-        logger.debug("mcp_stop: stdin close raised", extra={"err": repr(exc)})
-    try:
-        daemon.proc.terminate()
-        daemon.proc.wait(timeout=2.0)
-    except subprocess.TimeoutExpired:
+    with _mcp_lifecycle_lock:
+        daemon = _mcp_state
+        _mcp_state = None
+        if daemon is None:
+            return
+        with contextlib.suppress(Exception):
+            if daemon.proc.stdin is not None:
+                daemon.proc.stdin.close()
         try:
-            daemon.proc.kill()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("mcp_stop: kill raised", extra={"err": repr(exc)})
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("mcp_stop: terminate raised", extra={"err": repr(exc)})
+            daemon.proc.terminate()
+            daemon.proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(Exception):
+                daemon.proc.kill()
+        except Exception as exc:  # noqa: BLE001 — defensive teardown
+            logger.debug("mcp_stop: terminate raised", extra={"err": repr(exc)})
 
 
 def _mcp_spawn(*, db_path: Path | None, use_embeddings: bool) -> _McpDaemon:
@@ -461,11 +481,18 @@ def _mcp_spawn(*, db_path: Path | None, use_embeddings: bool) -> _McpDaemon:
 
     logger.debug("mcp_spawn: launching", extra={"argv": _redact_argv(argv)})
     try:
+        # AD-13: ``stderr=DEVNULL`` is deliberate. ``icm serve`` emits per-call
+        # log lines to stderr; if we ``PIPE``'d it, nothing would drain the
+        # pipe and the OS buffer (~64 KiB on Linux) would fill within ~hours
+        # of normal traffic. ``icm serve`` would then block on its next
+        # ``stderr.write`` → block the JSON-RPC response → wedge the entire
+        # transport. Operators who want server-side logs run ``icm serve``
+        # standalone with ``RUST_LOG=...`` to a file, not through the plugin.
         proc = subprocess.Popen(  # noqa: S603 — argv is a list, shell=False
             argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -564,59 +591,86 @@ def _mcp_call(
 ) -> dict[str, Any]:
     """Send one JSON-RPC request, return the parsed ``result`` payload.
 
+    The whole try/respawn/retry sequence runs under
+    :data:`_mcp_lifecycle_lock` so two threads can't observe each other
+    mid-respawn (which would otherwise cascade into N respawns for N
+    concurrent callers — see review note C2). Calls are inherently
+    sequential against one stdin pipe; serialising them here is correct.
+
     Lazy-respawns the daemon once on broken pipe / unexpected exit. On the
     second consecutive failure, sets ``_mcp_disabled`` and raises
     :class:`ICMNotFoundError` so the caller's degrade path takes over.
     """
-    global _mcp_disabled
-    if _mcp_disabled:
-        raise ICMNotFoundError("mcp transport disabled (post-second-death)")
-    if _mcp_state is None:
-        raise ICMNotFoundError("mcp transport not started; call mcp_start first")
-
-    try:
-        return _mcp_send_and_parse(_mcp_state, method, params, timeout_ms)
-    except (BrokenPipeError, ICMNotFoundError) as first_exc:
-        logger.warning(
-            "mcp: daemon died mid-call; respawning once",
-            extra={"err": repr(first_exc), "method": method},
-        )
-        try:
-            _mcp_respawn()
-        except Exception as respawn_exc:  # noqa: BLE001 — degrade to disabled
-            _mcp_disabled = True
-            logger.warning(
-                "mcp: respawn failed; transport disabled",
-                extra={"err": repr(respawn_exc)},
-            )
+    global _mcp_disabled, _mcp_state
+    with _mcp_lifecycle_lock:
+        if _mcp_disabled:
+            raise ICMNotFoundError("mcp transport disabled (post-second-death)")
+        if _mcp_state is None:
             raise ICMNotFoundError(
-                f"mcp respawn failed: {respawn_exc!r}"
-            ) from respawn_exc
-        if _mcp_state is None:  # pragma: no cover — _mcp_respawn sets it
-            _mcp_disabled = True
-            raise ICMNotFoundError("mcp respawn produced no daemon") from first_exc
+                "mcp transport not started; call mcp_start first"
+            )
+
         try:
             return _mcp_send_and_parse(_mcp_state, method, params, timeout_ms)
-        except (BrokenPipeError, ICMNotFoundError) as second_exc:
-            _mcp_disabled = True
+        except (BrokenPipeError, ICMNotFoundError) as first_exc:
             logger.warning(
-                "mcp: second death — transport disabled for the rest of the lifetime",
-                extra={"err": repr(second_exc)},
+                "mcp: daemon died mid-call; respawning once",
+                extra={"err": repr(first_exc), "method": method},
             )
-            raise ICMNotFoundError(
-                f"mcp daemon died twice in a row: {second_exc!r}"
-            ) from second_exc
+            try:
+                _mcp_respawn_locked()
+            except Exception as respawn_exc:  # noqa: BLE001 — degrade
+                _mcp_disabled = True
+                logger.warning(
+                    "mcp: respawn failed; transport disabled",
+                    extra={"err": repr(respawn_exc)},
+                )
+                raise ICMNotFoundError(
+                    f"mcp respawn failed: {respawn_exc!r}"
+                ) from respawn_exc
+            if _mcp_state is None:  # pragma: no cover — _mcp_respawn_locked sets it
+                _mcp_disabled = True
+                raise ICMNotFoundError(
+                    "mcp respawn produced no daemon"
+                ) from first_exc
+            try:
+                return _mcp_send_and_parse(
+                    _mcp_state, method, params, timeout_ms
+                )
+            except (BrokenPipeError, ICMNotFoundError) as second_exc:
+                _mcp_disabled = True
+                logger.warning(
+                    "mcp: second death — transport disabled for the rest "
+                    "of the lifetime",
+                    extra={"err": repr(second_exc)},
+                )
+                raise ICMNotFoundError(
+                    f"mcp daemon died twice in a row: {second_exc!r}"
+                ) from second_exc
 
 
-def _mcp_respawn() -> None:
-    """Tear down the dead daemon and start a fresh one with cached args."""
+def _mcp_respawn_locked() -> None:
+    """Tear down the dead daemon and start a fresh one with cached args.
+
+    MUST be called with :data:`_mcp_lifecycle_lock` already held — the
+    caller is :func:`_mcp_call`. Inlines the teardown rather than calling
+    :func:`mcp_stop` so we don't double-acquire the (non-reentrant) lock.
+    """
     global _mcp_state
     cached_db: Path | None = None
     cached_embed: bool = True
-    if _mcp_state is not None:
-        cached_db = _mcp_state.cached_db_path
-        cached_embed = _mcp_state.cached_use_embeddings
-    mcp_stop()
+    daemon = _mcp_state
+    if daemon is not None:
+        cached_db = daemon.cached_db_path
+        cached_embed = daemon.cached_use_embeddings
+        with contextlib.suppress(Exception):
+            if daemon.proc.stdin is not None:
+                daemon.proc.stdin.close()
+        with contextlib.suppress(Exception):
+            daemon.proc.terminate()
+        with contextlib.suppress(Exception):
+            daemon.proc.wait(timeout=2.0)
+    _mcp_state = None
     _mcp_state = _mcp_spawn(db_path=cached_db, use_embeddings=cached_embed)
 
 
@@ -626,16 +680,20 @@ def _mcp_send_and_parse(
     params: dict[str, Any],
     timeout_ms: int,
 ) -> dict[str, Any]:
-    """Lock + write + read; return the unwrapped ``result`` dict."""
-    with daemon.lock:
-        rid = _mcp_alloc_id(daemon)
-        _mcp_write(daemon, {
-            "jsonrpc": "2.0",
-            "id": rid,
-            "method": method,
-            "params": params,
-        })
-        msg = _mcp_read_response(daemon, rid, timeout_ms=timeout_ms)
+    """Write request + read response; return the unwrapped ``result`` dict.
+
+    Caller (``_mcp_call``) holds :data:`_mcp_lifecycle_lock` — no per-daemon
+    lock needed because all stdin/stdout I/O is funneled through that one
+    module-level lock.
+    """
+    rid = _mcp_alloc_id(daemon)
+    _mcp_write(daemon, {
+        "jsonrpc": "2.0",
+        "id": rid,
+        "method": method,
+        "params": params,
+    })
+    msg = _mcp_read_response(daemon, rid, timeout_ms=timeout_ms)
     if "error" in msg:
         raise ICMNonZeroExitError(json.dumps(msg["error"])[:_STDOUT_SNIPPET])
     result = msg.get("result")
@@ -741,13 +799,18 @@ def _mcp_store(
 
 # Recall text comes back as repeated ``[topic] **title**\n\nbody.\n\n`` blocks.
 # This regex finds each block start; we then split + populate hit dicts.
-# Recall hits start with ``^[<topic>] `` (group 1 = topic). Whatever follows
-# on the rest of that block — until the next ``^[`` line or EOF — is the
-# memory content. The optional ``**<title>**\n\n<body>`` shape (which
-# ``icm serve`` uses for full-section dumps in non-search modes) is unwrapped
-# inside :func:`_parse_mcp_recall_text` so single-line search hits and
-# title+body dumps both produce the same ``{topic, summary}`` shape.
-_MCP_RECALL_HEADER = re.compile(r"^\[([^\]]+)\]\s?(.*?)$", re.MULTILINE)
+# Recall hits start with ``^[<topic>] `` (group 1 = topic). The topic
+# character class is restricted to lowercase slug — ``[a-z0-9][a-z0-9_-]*``
+# — to avoid matching markdown link / footnote / chat-prefix syntax inside
+# memory bodies (e.g. ``[issue tracker]``, ``[Co-Authored-By]``, ``[1]``).
+# All real ICM topics observed are lowercase slugs (``errors-resolved``,
+# ``decisions-{project}``, ``hubs``, etc.). Memories whose content
+# legitimately starts a line with ``[lowercase-slug]`` will still be
+# mis-split — documented limitation; v0.3 should switch to a structured
+# response format from icm-serve if/when one is exposed.
+_MCP_RECALL_HEADER = re.compile(
+    r"^\[([a-z0-9][a-z0-9_-]*)\]\s?(.*?)$", re.MULTILINE
+)
 _MCP_TITLE_BODY = re.compile(r"^\*\*(.+?)\*\*\s*\n\s*\n(.*)\Z", re.DOTALL)
 
 

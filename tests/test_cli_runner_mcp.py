@@ -494,6 +494,95 @@ def test_mcp_recall_lock_serializes_concurrent_calls() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_mcp_call_respawn_does_not_cascade_under_concurrency() -> None:
+    """v0.2 review fix C2 — concurrent broken-pipe must trigger AT MOST one respawn.
+
+    Before the lifecycle-lock fix, two threads racing through ``_mcp_call``
+    against a dying daemon would each independently trigger ``_mcp_respawn``,
+    cascading into N spawns for N concurrent callers (each paying the
+    embedding-model cold start). With the module-level lock, only one of
+    them does the respawn; the second picks up the fresh ``_mcp_state`` on
+    its retry without triggering a second respawn.
+    """
+    text = "[errors-resolved] ok.\n"
+    # Daemon A: dies on the recall write; daemon B: handshake + two recalls.
+    popen_a, fake_stdin_a, _ = _make_popen_mock([_initialize_response(req_id=1)])
+    real_a = fake_stdin_a.write
+    a_writes = {"n": 0}
+
+    def _a_die(data: str) -> int:
+        a_writes["n"] += 1
+        if a_writes["n"] > 2:
+            raise BrokenPipeError("A died")
+        return real_a(data)
+
+    fake_stdin_a.write = _a_die  # type: ignore[method-assign]
+
+    popen_b, _stdin_b, _stdout_b = _make_popen_mock(
+        [
+            _initialize_response(req_id=1),
+            _tools_call_response(req_id=2, text=text),
+            _tools_call_response(req_id=3, text=text),
+            _tools_call_response(req_id=4, text=text),
+            _tools_call_response(req_id=5, text=text),
+        ]
+    )
+
+    with patch(POPEN_TARGET, side_effect=[popen_a, popen_b]) as p:
+        cli_runner.mcp_start(db_path=None, use_embeddings=True)
+        results: list[Any] = []
+        errors: list[BaseException] = []
+
+        def _call() -> None:
+            try:
+                hits = cli_runner.run_recall(
+                    query="q",
+                    limit=1,
+                    db_path=None,
+                    timeout_ms=2000,
+                    transport="mcp",
+                )
+                results.append(hits)
+            except BaseException as exc:  # noqa: BLE001 — record for assert
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_call) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    # Exactly two Popen calls — one initial spawn + ONE respawn — even
+    # though four concurrent callers raced through ``_mcp_call``.
+    assert p.call_count == 2, (
+        f"expected exactly 2 spawns (start+1 respawn), got {p.call_count}"
+    )
+    assert not errors, f"unexpected errors: {errors!r}"
+    # Every concurrent caller eventually got a non-empty hit list.
+    assert len(results) == 4
+    assert all(r and r[0]["topic"] == "errors-resolved" for r in results)
+
+
+def test_parse_recall_text_ignores_markdown_link_syntax() -> None:
+    """v0.2 review fix H2 — non-slug bracketed text inside a body must not split.
+
+    A memory body containing ``[issue tracker]`` (space) or ``[Co-Authored-By]``
+    (uppercase) used to be parsed as a phantom topic boundary, fabricating
+    extra hits with bogus topic names. The slug-restricted regex must keep
+    this content inside the original hit's summary.
+    """
+    text = (
+        "[errors-resolved] Fixed import bug.\n"
+        "Refs: [issue tracker], [Co-Authored-By], [1].\n"
+        "[decisions-x] Locked the migration plan.\n"
+    )
+    hits = cli_runner._parse_mcp_recall_text(text)
+    assert [h["topic"] for h in hits] == ["errors-resolved", "decisions-x"]
+    # The first hit's summary keeps the markdown links inside the body.
+    assert "issue tracker" in hits[0]["summary"]
+    assert "Co-Authored-By" in hits[0]["summary"]
+
+
 def test_run_recall_transport_cli_uses_subprocess_run() -> None:
     """Default ``transport='cli'`` keeps the v0.1.1 fresh-subprocess argv shape."""
     with patch(
