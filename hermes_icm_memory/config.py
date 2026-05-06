@@ -152,6 +152,24 @@ _SCHEMA_ENTRIES: Final[list[dict[str, Any]]] = [
             "hosts are fine with the default."
         ),
     },
+    # ---- v0.2 addition ------------------------------------------------------
+    {
+        "key": "transport",
+        "type": "enum",
+        "default": "cli",
+        "choices": ["cli", "mcp"],
+        "secret": False,
+        "required": False,
+        "description": (
+            "How cli_runner talks to icm. 'cli' (default) spawns a fresh "
+            "subprocess per call — simple, no daemon. 'mcp' spawns one "
+            "long-lived 'icm serve' subprocess per provider lifetime and "
+            "reuses it via JSON-RPC over stdin/stdout, amortizing the "
+            "embedding-model load across calls. Pi-class operators should "
+            "pair 'transport: mcp' with 'use_embeddings: true' to get fast "
+            "semantic recall after the first call's warmup."
+        ),
+    },
 ]
 
 #: Per-key minimum integer values. Keys absent from this map have no lower bound

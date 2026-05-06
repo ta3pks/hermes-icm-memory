@@ -86,6 +86,7 @@ def test_prefetch_calls_run_recall_with_config_limit_and_timeout(
         db_path: Path | None,
         timeout_ms: int,
         use_embeddings: bool = False,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -378,6 +379,8 @@ def test_worker_drains_fifo_order(
         timeout_ms: int,
         keywords: str | None = None,
         raw: str | None = None,
+        *,
+        transport: str = "cli",
     ) -> None:
         with seen_lock:
             seen.append(topic)
@@ -422,6 +425,8 @@ def test_worker_survives_run_store_exception(
         timeout_ms: int,
         keywords: str | None = None,
         raw: str | None = None,
+        *,
+        transport: str = "cli",
     ) -> None:
         call_index["n"] += 1
         if call_index["n"] == 1:
@@ -704,6 +709,7 @@ def test_provider_prefetch_default_shared_passes_db_none(
         db_path: Path | None,
         timeout_ms: int,
         use_embeddings: bool = True,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -739,6 +745,7 @@ def test_provider_prefetch_use_embeddings_opt_out_threads_through(
         db_path: Path | None,
         timeout_ms: int,
         use_embeddings: bool = True,
+        transport: str = "cli",
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:

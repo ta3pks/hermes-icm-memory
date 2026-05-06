@@ -78,10 +78,14 @@ class WriteTask:
 class WorkerState:
     """Mutable worker-state bundle held by the provider.
 
-    A single dataclass keeps the eight related fields adjacent — the
-    producer (``submit_triggers``) and the consumer (``worker_loop``) both
-    read+write a subset, and grouping them here removes eight scattered
-    instance attributes from :class:`IcmMemoryProvider`.
+    A single dataclass keeps the related fields adjacent — the producer
+    (``submit_triggers``) and the consumer (``worker_loop``) both read+write
+    a subset, and grouping them here removes scattered instance attributes
+    from :class:`IcmMemoryProvider`.
+
+    ``transport`` is captured at worker-spawn time (the worker thread runs
+    detached from the provider's config dict, so we hand it the value rather
+    than re-read on every drain).
     """
 
     write_queue: queue.Queue[WriteTask] | None = None
@@ -91,6 +95,7 @@ class WorkerState:
     respawn_count: int = 0
     writes_disabled: bool = False
     turn_index: int = 0
+    transport: str = "cli"
 
 
 # ---------- Worker loop ------------------------------------------------------
@@ -103,6 +108,7 @@ def worker_loop(
     timeout_ms: int,
     overflow_burst: list[bool],
     stop_event: threading.Event,
+    transport: str = "cli",
 ) -> None:
     """Daemon worker body. FIFO drain via blocking ``get`` with a 100 ms tick.
 
@@ -110,6 +116,10 @@ def worker_loop(
     surface) and ``Exception`` (defensive — must not let the thread die).
     Each successful drain clears ``overflow_burst[0]`` so the next overflow
     burst gets exactly one WARNING.
+
+    ``transport`` is captured by the producer (provider's ``_ensure_worker``)
+    and pinned for the worker's lifetime — re-reading per-task would race
+    against config edits.
     """
     while not stop_event.is_set():
         try:
@@ -124,6 +134,7 @@ def worker_loop(
                 db_path,
                 timeout_ms,
                 keywords=",".join(task.keywords) if task.keywords else None,
+                transport=transport,
             )
         except ICMError as exc:
             logger.warning(
@@ -149,6 +160,7 @@ def ensure_worker(
     queue_size: int,
     db_path: Path | None,
     write_timeout_ms: int,
+    transport: str = "cli",
 ) -> bool:
     """Create the queue + spawn the worker on first need; respawn if dead.
 
@@ -161,6 +173,8 @@ def ensure_worker(
 
     if state.write_queue is None:
         state.write_queue = queue.Queue(maxsize=queue_size)
+
+    state.transport = transport
 
     if state.worker is None:
         state.worker = _spawn_worker(state, db_path, write_timeout_ms)
@@ -200,6 +214,7 @@ def _spawn_worker(
             "timeout_ms": timeout_ms,
             "overflow_burst": state.overflow_burst,
             "stop_event": state.stop_event,
+            "transport": state.transport,
         },
         name="hermes-icm-writer",
         daemon=True,
@@ -219,6 +234,7 @@ def run_prefetch(
     timeout_ms: int,
     cache: dict[int, list[dict[str, Any]]],
     use_embeddings: bool = False,
+    transport: str = "cli",
 ) -> list[dict[str, Any]]:
     """Run a single recall, cache hits keyed by ``hash(query)``.
 
@@ -230,6 +246,9 @@ def run_prefetch(
     v0.1.1 — ``db_path`` may be ``None`` (default-shared mode lets ``icm``
     use its canonical OS-default DB) and ``use_embeddings`` controls the
     ``--no-embeddings`` flag in ``cli_runner.run_recall``.
+
+    v0.2 — ``transport`` selects between the fresh-subprocess CLI path and
+    the long-lived ``icm serve`` daemon (MCP) for amortized embedding loads.
     """
     key = hash(query)
     try:
@@ -239,6 +258,7 @@ def run_prefetch(
             db_path=db_path,
             timeout_ms=timeout_ms,
             use_embeddings=use_embeddings,
+            transport=transport,
         )
     except ICMError as exc:
         logger.warning(

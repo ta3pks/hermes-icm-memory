@@ -17,7 +17,7 @@ import pytest
 from hermes_icm_memory import config
 
 # Architecture §10.1 — the original ten frozen config keys plus the two v0.1.1
-# additions (``isolated``, ``use_embeddings``).
+# additions (``isolated``, ``use_embeddings``) and the v0.2 ``transport`` enum.
 _EXPECTED_KEYS: set[str] = {
     "default_importance",
     "topic_prefix",
@@ -32,18 +32,20 @@ _EXPECTED_KEYS: set[str] = {
     # v0.1.1 additions:
     "isolated",
     "use_embeddings",
+    # v0.2 addition:
+    "transport",
 }
 
 
-def test_default_schema_has_twelve_keys() -> None:
-    """Schema covers exactly the twelve config keys with required fields.
+def test_default_schema_has_thirteen_keys() -> None:
+    """Schema covers exactly the thirteen config keys with required fields.
 
     Ten architecture §10.1 keys + two v0.1.1 additions
-    (``isolated``, ``use_embeddings``).
+    (``isolated``, ``use_embeddings``) + one v0.2 addition (``transport``).
     """
     schema = config.get_default_schema()
     assert isinstance(schema, list)
-    assert len(schema) == 12
+    assert len(schema) == 13
     keys = {entry["key"] for entry in schema}
     assert keys == _EXPECTED_KEYS, f"unexpected schema keys: {keys ^ _EXPECTED_KEYS}"
     for entry in schema:
@@ -238,6 +240,31 @@ def test_validate_rejects_non_bool_for_use_embeddings() -> None:
     ok, payload = config.validate({"use_embeddings": "maybe"})
     assert ok is False
     assert "use_embeddings" in payload["error"]
+
+
+def test_transport_default_is_cli() -> None:
+    """v0.2 — ``transport`` defaults to ``cli`` (no behaviour change for v0.1.x users)."""
+    schema = {entry["key"]: entry for entry in config.get_default_schema()}
+    transport_entry = schema["transport"]
+    assert transport_entry["type"] == "enum"
+    assert transport_entry["default"] == "cli"
+    assert set(transport_entry["choices"]) == {"cli", "mcp"}
+
+
+def test_validate_accepts_transport_cli_and_mcp() -> None:
+    """``transport`` accepts both enum values."""
+    ok, normalized = config.validate({"transport": "cli"})
+    assert ok and normalized["transport"] == "cli"
+    ok, normalized = config.validate({"transport": "mcp"})
+    assert ok and normalized["transport"] == "mcp"
+
+
+def test_validate_rejects_unknown_transport() -> None:
+    """``transport`` is case-sensitive; unknown names rejected with the named key."""
+    for bogus in ("MCP", "Cli", "stdio", "", 42, None):
+        ok, payload = config.validate({"transport": bogus})
+        assert ok is False, f"expected rejection for transport={bogus!r}"
+        assert "transport" in payload["error"]
 
 
 def test_resolve_db_path_default_profile(tmp_path: Path) -> None:

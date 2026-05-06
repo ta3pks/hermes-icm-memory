@@ -183,6 +183,17 @@ def _use_embeddings(provider: IcmMemoryProvider) -> bool:
     return raw if isinstance(raw, bool) else True
 
 
+def _transport(provider: IcmMemoryProvider) -> str:
+    """Resolve the ``transport`` enum from provider config (default ``"cli"``).
+
+    v0.2: ``"cli"`` keeps the fresh-subprocess path; ``"mcp"`` routes through
+    the long-lived ``icm serve`` daemon. Bogus / missing values silently fall
+    back to ``"cli"`` so a corrupted config can never wedge the read path.
+    """
+    raw = _provider_config(provider).get("transport", "cli")
+    return raw if raw in ("cli", "mcp") else "cli"
+
+
 def _recall_limit(provider: IcmMemoryProvider, override: object) -> int:
     """Resolve the recall limit from caller arg, then config, then default."""
     return (
@@ -279,6 +290,7 @@ def _handle_recall(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
     topic = args.get("topic") if isinstance(args.get("topic"), str) else None
     project = args.get("project") if isinstance(args.get("project"), str) else None
     use_embeddings = _use_embeddings(provider)
+    transport = _transport(provider)
 
     return _run_read(
         provider,
@@ -290,6 +302,7 @@ def _handle_recall(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
             db,
             ms,
             use_embeddings=use_embeddings,
+            transport=transport,
             topic=topic,
             project=project,
         ),
@@ -333,13 +346,23 @@ def _handle_store(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
 
 def _handle_topics(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
     del args  # icm_topics takes no parameters
-    return _run_read(provider, "icm_topics", "topics", run_topics)
+    transport = _transport(provider)
+    return _run_read(
+        provider,
+        "icm_topics",
+        "topics",
+        lambda db, ms: run_topics(db, ms, transport=transport),
+    )
 
 
 def _handle_health(provider: IcmMemoryProvider, args: dict[str, Any]) -> str:
     topic = args.get("topic") if isinstance(args.get("topic"), str) else None
+    transport = _transport(provider)
     return _run_read(
-        provider, "icm_health", "report", lambda db, ms: run_health(db, ms, topic=topic)
+        provider,
+        "icm_health",
+        "report",
+        lambda db, ms: run_health(db, ms, topic=topic, transport=transport),
     )
 
 
