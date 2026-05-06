@@ -81,9 +81,29 @@ def test_is_available_no_socket(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------- AC6/AC7/AC8: initialize -------------------------------------------
 
 
-def test_initialize_resolves_db_path(tmp_hermes_home: Path) -> None:
-    """AC6 — ``_db_path`` matches ``config.resolve_db_path``; ``_session_id`` recorded."""
+def test_initialize_default_shared_db_path_stays_none(tmp_hermes_home: Path) -> None:
+    """v0.1.1 — default config keeps ``_db_path = None`` (brief's shared-with-editors).
+
+    ``initialize`` records ``_session_id`` + ``_init_args`` but performs no
+    path resolution and no filesystem touch under ``<hermes_home>/icm/``. This
+    is the brief's value-prop default — the plugin shells out to ``icm`` with
+    no ``--db`` so icm uses its canonical OS-default DB (the same file Claude
+    Code, Cursor, OpenCode, etc. share).
+    """
     provider = IcmMemoryProvider()
+    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="work")
+
+    assert provider._db_path is None
+    assert provider._session_id == "s1"
+    assert provider._init_args == ("s1", str(tmp_hermes_home), "work")
+    # No filesystem touch under hermes_home/icm/ in default-shared mode.
+    assert not (tmp_hermes_home / "icm").exists()
+
+
+def test_initialize_isolated_resolves_db_path(tmp_hermes_home: Path) -> None:
+    """v0.1.1 — opt-in ``isolated=True`` restores the v0.1.0 per-profile DB path."""
+    provider = IcmMemoryProvider()
+    provider._config["isolated"] = True
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="work")
 
     expected = config.resolve_db_path(tmp_hermes_home, "work")
@@ -91,9 +111,13 @@ def test_initialize_resolves_db_path(tmp_hermes_home: Path) -> None:
     assert provider._session_id == "s1"
 
 
-def test_initialize_creates_parent_dir(tmp_hermes_home: Path) -> None:
-    """AC7 — ``<hermes_home>/icm/`` exists; the .db file does not (no icm init)."""
+def test_initialize_creates_parent_dir_when_isolated(tmp_hermes_home: Path) -> None:
+    """v0.1.1 — under ``isolated=True``, ``<hermes_home>/icm/`` is created (no .db file).
+
+    Default-shared mode performs no mkdir; this AC fires only on opt-in.
+    """
     provider = IcmMemoryProvider()
+    provider._config["isolated"] = True
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
 
     icm_dir = tmp_hermes_home / "icm"
@@ -101,10 +125,16 @@ def test_initialize_creates_parent_dir(tmp_hermes_home: Path) -> None:
     assert not (icm_dir / "default.db").exists(), "plugin must not invoke icm init"
 
 
-def test_initialize_idempotent(
+def test_initialize_idempotent_isolated(
     tmp_hermes_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC8 — second initialize() call with same args performs no extra mkdir."""
+    """AC8 — second initialize() call with same args performs no extra mkdir.
+
+    Pinned under ``isolated=True`` because mkdir only runs in the isolated
+    branch — default-shared mode skips mkdir entirely and is trivially
+    idempotent. The (session_id, hermes_home, profile) guard still fires in
+    both modes.
+    """
     real_mkdir = Path.mkdir
     calls: list[Path] = []
 
@@ -115,6 +145,7 @@ def test_initialize_idempotent(
     monkeypatch.setattr(Path, "mkdir", _counting_mkdir)
 
     provider = IcmMemoryProvider()
+    provider._config["isolated"] = True
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="work")
     first_count = len(calls)
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="work")
@@ -125,12 +156,27 @@ def test_initialize_idempotent(
     )
 
 
-def test_initialize_with_unwritable_hermes_home_self_disables(
+def test_initialize_idempotent_default_shared(tmp_hermes_home: Path) -> None:
+    """v0.1.1 — default-shared re-init guard fires (no rework on duplicate call)."""
+    provider = IcmMemoryProvider()
+    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile=None)
+    first_args = provider._init_args
+    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile=None)
+    assert provider._init_args == first_args
+    assert provider._db_path is None
+
+
+def test_initialize_with_unwritable_hermes_home_self_disables_when_isolated(
     tmp_hermes_home: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """AC9 — OSError from mkdir → log WARNING, do not raise, ``is_available()`` flips False."""
+    """AC9 — OSError from mkdir under ``isolated=True`` → WARNING + self-disable.
+
+    Default-shared mode never touches the filesystem in ``initialize`` so the
+    self-disable branch is unreachable there; this AC pins the v0.1.0 row 8
+    failure-mode behavior under the new opt-in.
+    """
 
     def _raise_oserror(_db_path: Path) -> None:
         raise OSError("read-only filesystem")
@@ -141,6 +187,7 @@ def test_initialize_with_unwritable_hermes_home_self_disables(
     monkeypatch.setattr(shutil, "which", lambda _: "/usr/local/bin/icm")
 
     provider = IcmMemoryProvider()
+    provider._config["isolated"] = True
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.provider"):
         provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
 
@@ -149,6 +196,32 @@ def test_initialize_with_unwritable_hermes_home_self_disables(
         for record in caplog.records
     ), f"expected a WARNING about init failure; got {[r.message for r in caplog.records]!r}"
     assert provider.is_available() is False, "self-disable: is_available must return False"
+
+
+def test_initialize_default_shared_no_mkdir_on_unwritable(
+    tmp_hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.1.1 — default-shared mode never calls mkdir, so a read-only FS is benign.
+
+    If an operator points Hermes at a read-only ``hermes_home`` and stays in
+    the default-shared mode, ``initialize`` is a no-op as far as the filesystem
+    is concerned: the plugin will shell out to ``icm`` with no ``--db`` and let
+    icm read/write its own canonical DB instead.
+    """
+
+    def _raise_oserror(_db_path: Path) -> None:
+        raise OSError("never-fires-in-default-shared")
+
+    monkeypatch.setattr(config, "mkdir_parent", _raise_oserror)
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/local/bin/icm")
+
+    provider = IcmMemoryProvider()
+    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
+
+    # No self-disable: the OSError path was never reached.
+    assert provider.is_available() is True
+    assert provider._db_path is None
 
 
 # ---------- AC10: get_config_schema ------------------------------------------

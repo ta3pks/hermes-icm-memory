@@ -34,27 +34,45 @@ from hermes_icm_memory.provider import IcmMemoryProvider
 
 # ---------- helpers -----------------------------------------------------------
 
-#: Sentinel DB path used by read-path tests — sole purpose is to be non-None
-#: so the "provider not initialized" guard in tools.py does not short-circuit.
-#: Tests still mock ``run_recall`` / ``run_topics`` / ``run_health`` so the
-#: path never reaches subprocess.
+#: Sentinel DB path used by isolated-mode tests — non-None so write-path
+#: handlers can pin the queued task. Read-path handlers in v0.1.1 guard on
+#: ``_init_args is None`` (not ``_db_path is None``); a default-shared provider
+#: with ``_init_args`` set + ``_db_path is None`` is a legitimate state.
 _FAKE_DB = Path("/tmp/__hermes_icm_test__/default.db")
 
 
 def _read_provider() -> IcmMemoryProvider:
-    """Fresh provider with `_db_path` set so read-path handlers don't short-circuit."""
+    """Fresh provider with ``_init_args`` set so read-path handlers don't short-circuit.
+
+    v0.1.1: read tools guard on ``_init_args is None`` (provider never
+    initialized), not ``_db_path is None`` (which is the legitimate
+    default-shared sentinel). Setting ``_init_args`` mimics a post-initialize
+    default-shared state — ``_db_path`` stays ``None``.
+    """
     p = IcmMemoryProvider()
+    p._init_args = ("test-session", "/tmp/test-hermes-home", None)
+    return p
+
+
+def _isolated_read_provider() -> IcmMemoryProvider:
+    """Read-path provider with a concrete ``_db_path`` (legacy isolated mode)."""
+    p = IcmMemoryProvider()
+    p._init_args = ("test-session", "/tmp/test-hermes-home", "default")
     p._db_path = _FAKE_DB
     return p
 
 
 def _provider_with_queue(qsize: int = 8) -> IcmMemoryProvider:
-    """Fresh provider with a bounded write queue + `_db_path` attached.
+    """Fresh provider with a bounded write queue + ``_db_path`` attached.
 
-    Mocks at the source: ``_worker_state.write_queue`` is the writable field
-    that ``provider._write_queue`` (read-only property) reads from.
+    Used for write-path tests that need a concrete queue + ``_db_path`` (the
+    worker spawns only when ``_db_path`` is non-None — v0.1.1 keeps writes
+    isolated-only). Mocks at the source: ``_worker_state.write_queue`` is the
+    writable field that ``provider._write_queue`` (read-only property) reads
+    from.
     """
     p = IcmMemoryProvider()
+    p._init_args = ("test-session", "/tmp/test-hermes-home", "default")
     p._db_path = _FAKE_DB
     p._worker_state.write_queue = queue.Queue(maxsize=qsize)
     return p
@@ -129,6 +147,7 @@ def test_recall_returns_json_string_with_hits_key(
         limit: int,
         db_path: Any,
         timeout_ms: int,
+        use_embeddings: bool = False,
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -581,6 +600,7 @@ def test_recall_rejects_bool_limit_falls_back_to_default(
         limit: int,
         db_path: Any,
         timeout_ms: int,
+        use_embeddings: bool = False,
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -602,6 +622,7 @@ def test_recall_uses_configured_timeout(monkeypatch: pytest.MonkeyPatch) -> None
         limit: int,
         db_path: Any,
         timeout_ms: int,
+        use_embeddings: bool = False,
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -627,6 +648,7 @@ def test_recall_uses_configured_recall_limit(
         limit: int,
         db_path: Any,
         timeout_ms: int,
+        use_embeddings: bool = False,
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -655,8 +677,13 @@ def test_read_handlers_degrade_when_provider_not_initialized(
     expected_payload: dict[str, Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Bare provider (no `_db_path`) → degrade JSON + WARNING, no raise."""
-    provider = IcmMemoryProvider()  # _db_path stays None
+    """Bare provider (``_init_args is None``) → degrade JSON + WARNING, no raise.
+
+    v0.1.1: the guard now hangs off ``_init_args`` rather than ``_db_path``
+    because the latter is a legitimate ``None`` in default-shared mode. The
+    "actually never initialized" condition is ``_init_args is None``.
+    """
+    provider = IcmMemoryProvider()  # _init_args stays None
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.tools"):
         result = provider.handle_tool_call(name, args)
     assert isinstance(result, str)
@@ -664,6 +691,91 @@ def test_read_handlers_degrade_when_provider_not_initialized(
     assert any(
         "not initialized" in record.getMessage() for record in caplog.records
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("icm_recall", {"query": "x"}),
+        ("icm_topics", {}),
+        ("icm_health", {}),
+    ],
+)
+def test_read_handlers_proceed_when_initialized_default_shared(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    args: dict[str, Any],
+) -> None:
+    """v0.1.1 — initialized default-shared provider (``_db_path is None``) does NOT degrade.
+
+    The "not initialized" guard fires only on a *truly* uninitialized
+    provider; a post-initialize default-shared provider is a legitimate
+    state and read calls flow through to ``cli_runner`` with ``db_path=None``.
+    """
+    captured: dict[str, Any] = {"db_path": "<unset>"}
+
+    def _fake_run_recall(
+        query: str,
+        limit: int,
+        db_path: Any,
+        timeout_ms: int,
+        use_embeddings: bool = False,
+        topic: str | None = None,
+        project: str | None = None,
+    ) -> list[dict[str, Any]]:
+        captured["db_path"] = db_path
+        return [{"id": "m1"}]
+
+    def _fake_run_topics(db_path: Any, timeout_ms: int) -> list[dict[str, Any]]:
+        captured["db_path"] = db_path
+        return [{"topic": "p"}]
+
+    def _fake_run_health(
+        db_path: Any, timeout_ms: int, topic: str | None = None
+    ) -> dict[str, Any]:
+        captured["db_path"] = db_path
+        return {"stale": "0"}
+
+    monkeypatch.setattr(tools, "run_recall", _fake_run_recall)
+    monkeypatch.setattr(tools, "run_topics", _fake_run_topics)
+    monkeypatch.setattr(tools, "run_health", _fake_run_health)
+
+    provider = _read_provider()  # _init_args set, _db_path is None
+    result = provider.handle_tool_call(name, args)
+    payload = json.loads(result)
+    assert "error" not in payload, f"unexpected error from {name}: {payload!r}"
+    assert captured["db_path"] is None
+
+
+def test_recall_threads_use_embeddings_from_provider_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.1.1 — provider config ``use_embeddings`` flows to ``cli_runner.run_recall``."""
+    captured: dict[str, Any] = {}
+
+    def _fake_run_recall(
+        query: str,
+        limit: int,
+        db_path: Any,
+        timeout_ms: int,
+        use_embeddings: bool = False,
+        topic: str | None = None,
+        project: str | None = None,
+    ) -> list[dict[str, Any]]:
+        captured["use_embeddings"] = use_embeddings
+        return []
+
+    monkeypatch.setattr(tools, "run_recall", _fake_run_recall)
+
+    # Default config → False.
+    provider = _read_provider()
+    provider.handle_tool_call("icm_recall", {"query": "x"})
+    assert captured["use_embeddings"] is False
+
+    # Opt-in → True.
+    provider._config["use_embeddings"] = True
+    provider.handle_tool_call("icm_recall", {"query": "x"})
+    assert captured["use_embeddings"] is True
 
 
 # =============================================================================
@@ -777,6 +889,7 @@ def test_corrupt_config_does_not_crash_read_handlers(
         limit: int,
         db_path: Any,
         timeout_ms: int,
+        use_embeddings: bool = False,
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:

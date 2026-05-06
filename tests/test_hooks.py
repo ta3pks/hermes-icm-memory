@@ -43,8 +43,16 @@ from hermes_icm_memory.provider import IcmMemoryProvider
 
 @pytest.fixture
 def initialized_provider(tmp_hermes_home: Path) -> IcmMemoryProvider:
-    """Provider with ``initialize()`` already called and ``_available=True``."""
+    """Provider with ``initialize()`` already called and ``_available=True``.
+
+    v0.1.1: forces ``isolated=True`` *before* ``initialize`` so ``_db_path``
+    becomes a concrete path (worker spawning + ``run_recall`` sentinel checks
+    in this file all assume a non-None ``_db_path``). Tests that exercise the
+    new default-shared (``_db_path is None``) behaviour construct their own
+    provider directly.
+    """
     provider = IcmMemoryProvider()
+    provider._config["isolated"] = True
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
     # initialize sets _available only on failure; force True for the happy path.
     provider._available = True
@@ -75,8 +83,9 @@ def test_prefetch_calls_run_recall_with_config_limit_and_timeout(
     def fake_run_recall(
         query: str,
         limit: int,
-        db_path: Path,
+        db_path: Path | None,
         timeout_ms: int,
+        use_embeddings: bool = False,
         topic: str | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -673,3 +682,69 @@ def test_provider_prefetch_returns_empty_when_unavailable(
     monkeypatch.setattr(_shutil, "which", lambda _: None)
     provider = IcmMemoryProvider()
     assert provider.prefetch(query="x") == ""
+
+
+def test_provider_prefetch_default_shared_passes_db_none(
+    tmp_hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.1.1 — default-shared mode lets prefetch run with ``db_path=None``.
+
+    The legacy ``or self._db_path is None`` short-circuit on ``provider.prefetch``
+    has been removed: ``None`` is now the legitimate "use icm canonical default"
+    sentinel. Verifies the path flows through to ``cli_runner.run_recall`` with
+    ``db_path=None`` *and* ``use_embeddings=False`` (the v0.1.1 Pi-safe default).
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_run_recall(
+        query: str,
+        limit: int,
+        db_path: Path | None,
+        timeout_ms: int,
+        use_embeddings: bool = False,
+        topic: str | None = None,
+        project: str | None = None,
+    ) -> list[dict[str, Any]]:
+        captured["db_path"] = db_path
+        captured["use_embeddings"] = use_embeddings
+        return [{"id": "m1", "topic": "preferences", "summary": "shared hit"}]
+
+    monkeypatch.setattr(cli_runner, "run_recall", fake_run_recall)
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda _: "/usr/local/bin/icm")
+
+    provider = IcmMemoryProvider()
+    provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
+    assert provider._db_path is None  # default-shared sanity
+
+    block = provider.prefetch(query="dual-write policy")
+    assert "shared hit" in block
+    assert captured["db_path"] is None
+    assert captured["use_embeddings"] is False
+
+
+def test_provider_prefetch_use_embeddings_flag_threads_through(
+    monkeypatch: pytest.MonkeyPatch,
+    initialized_provider: IcmMemoryProvider,
+) -> None:
+    """v0.1.1 — ``use_embeddings=True`` flag flows from provider config to cli_runner."""
+    captured: dict[str, Any] = {}
+
+    def fake_run_recall(
+        query: str,
+        limit: int,
+        db_path: Path | None,
+        timeout_ms: int,
+        use_embeddings: bool = False,
+        topic: str | None = None,
+        project: str | None = None,
+    ) -> list[dict[str, Any]]:
+        captured["use_embeddings"] = use_embeddings
+        return []
+
+    monkeypatch.setattr(cli_runner, "run_recall", fake_run_recall)
+    initialized_provider._config["use_embeddings"] = True
+    initialized_provider.prefetch(query="x")
+    assert captured["use_embeddings"] is True

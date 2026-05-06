@@ -34,6 +34,9 @@ def test_external_write_visible_to_plugin(
 ) -> None:
     provider = IcmMemoryProvider()
     assert provider.is_available()
+    # v0.1.1: pin the plugin's DB to ``tmp_path`` (isolated mode) so the
+    # external write below targets the same file the plugin recalls from.
+    provider._config["isolated"] = True
     provider.initialize("s14-cross-tool", str(tmp_path))
 
     # Resolve the same DB path the provider derived from `tmp_path` so the

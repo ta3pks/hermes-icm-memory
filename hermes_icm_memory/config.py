@@ -7,7 +7,8 @@ mandated by AD-06).
 
 Public surface (frozen post-v1 per NFR-MAINT-1):
 
-* :func:`get_default_schema` — list of ten architecture-§10.1 entries.
+* :func:`get_default_schema` — list of twelve schema entries (ten architecture-§10.1
+  defaults + the v0.1.1 additions ``isolated`` and ``use_embeddings``).
 * :func:`validate` — structural validation, never raises (AD-18).
 * :func:`resolve_db_path` — ``<hermes_home>/icm/<profile>.db`` (AD-05).
 * :func:`mkdir_parent` — idempotent parent-dir creation (AD-06).
@@ -122,6 +123,33 @@ _SCHEMA_ENTRIES: Final[list[dict[str, Any]]] = [
         "secret": False,
         "required": False,
         "description": "If true, fire icm consolidate on configured topics at session end.",
+    },
+    # ---- v0.1.1 additions ---------------------------------------------------
+    {
+        "key": "isolated",
+        "type": "bool",
+        "default": False,
+        "secret": False,
+        "required": False,
+        "description": (
+            "If true, use a per-profile DB at <hermes_home>/icm/<profile>.db "
+            "(parallel silo). If false (default, the brief's value prop), share "
+            "icm's canonical default DB with Claude Code, Cursor, OpenCode, etc."
+        ),
+    },
+    {
+        "key": "use_embeddings",
+        "type": "bool",
+        "default": False,
+        "secret": False,
+        "required": False,
+        "description": (
+            "If true, icm recall uses semantic search (multilingual-e5-base ONNX "
+            "model). On Pi-class hardware this costs ~50s per subprocess call (model "
+            "loads from scratch every invocation), so default is false (keyword-only, "
+            "instant). v0.2 will introduce an icm-serve MCP transport that amortizes "
+            "the model load and allows true=default to be safe everywhere."
+        ),
     },
 ]
 

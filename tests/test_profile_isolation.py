@@ -1,7 +1,14 @@
 """Profile-isolation tests (S12 / Story 5.2).
 
 Locks the FR2 / NFR-SEC-2 / SM5 contract that two Hermes profiles produce two
-distinct ICM databases and never read each other's data. Four tests:
+distinct ICM databases and never read each other's data. As of v0.1.1, profile
+isolation is **opt-in** via the ``isolated`` config key — the plugin's default
+behaviour is to share the canonical icm DB with editors (Brief §"Shared memory
+with editors"). Every test here therefore enables ``isolated=True`` before
+calling ``initialize``; this is the configuration under which profile isolation
+is meaningful in v0.1.1+.
+
+Four tests:
 
 1. ``test_two_hermes_homes_two_dbs`` — distinct ``hermes_home`` values resolve to
    distinct ``_db_path``s, each contained inside its own ``hermes_home``.
@@ -27,6 +34,19 @@ import pytest
 
 from hermes_icm_memory.provider import IcmMemoryProvider
 
+
+def _isolated_provider() -> IcmMemoryProvider:
+    """Construct a provider with v0.1.1's opt-in ``isolated`` mode enabled.
+
+    Profile isolation is the explicit non-default behaviour as of v0.1.1; every
+    test in this module enables it before calling ``initialize`` so the
+    isolated-DB path branch fires.
+    """
+    provider = IcmMemoryProvider()
+    provider._config["isolated"] = True
+    return provider
+
+
 # ---------- AC1: two hermes_homes → two distinct dbs --------------------------
 
 
@@ -37,10 +57,10 @@ def test_two_hermes_homes_two_dbs(tmp_path: Path) -> None:
     home_b = tmp_path / "hh-B"
     home_b.mkdir()
 
-    provider_a = IcmMemoryProvider()
+    provider_a = _isolated_provider()
     provider_a.initialize(session_id="s1", hermes_home=home_a, profile="default")
 
-    provider_b = IcmMemoryProvider()
+    provider_b = _isolated_provider()
     provider_b.initialize(session_id="s1", hermes_home=home_b, profile="default")
 
     assert provider_a._db_path is not None
@@ -61,10 +81,10 @@ def test_two_profiles_one_hermes_home_two_dbs(tmp_path: Path) -> None:
     home = tmp_path / "hermes_home"
     home.mkdir()
 
-    provider_work = IcmMemoryProvider()
+    provider_work = _isolated_provider()
     provider_work.initialize(session_id="s1", hermes_home=home, profile="work")
 
-    provider_personal = IcmMemoryProvider()
+    provider_personal = _isolated_provider()
     provider_personal.initialize(session_id="s1", hermes_home=home, profile="personal")
 
     expected_work = home.resolve() / "icm" / "work.db"
@@ -130,9 +150,9 @@ def test_no_cross_profile_recall_leak(tmp_path: Path) -> None:
     home = tmp_path / "hermes_home"
     home.mkdir()
 
-    provider_a = IcmMemoryProvider()
+    provider_a = _isolated_provider()
     provider_a.initialize(session_id="s1", hermes_home=home, profile="alpha")
-    provider_b = IcmMemoryProvider()
+    provider_b = _isolated_provider()
     provider_b.initialize(session_id="s1", hermes_home=home, profile="beta")
 
     assert provider_a._db_path is not None
@@ -194,7 +214,7 @@ def test_db_path_inside_hermes_home_only(tmp_path: Path, profile: str | None) ->
     home = tmp_path / "hermes_home"
     home.mkdir()
 
-    provider = IcmMemoryProvider()
+    provider = _isolated_provider()
     provider.initialize(session_id="s1", hermes_home=home, profile=profile)
 
     assert provider._db_path is not None

@@ -54,6 +54,15 @@ Three steps, under five minutes on a machine where `icm` is already installed.
 
 User-tunable keys (importance default, recall limit, queue size, timeouts, prefetch toggle, etc.) are documented in [`_bmad-output/planning-artifacts/architecture.md`](./_bmad-output/planning-artifacts/architecture.md) §10.1. Configure via `hermes memory setup icm` or by editing the Hermes memory provider config for your profile.
 
+### v0.1.1 — sharing vs. isolation, embeddings vs. keyword-only
+
+Two keys control the trade-offs surfaced by the Pi 4 deploy on 2026-05-06; both default to the safer-for-most-users option:
+
+- **`isolated`** *(bool, default `false`)* — when `false`, the plugin omits `--db` and lets `icm` use its canonical OS-default database (the same SQLite file Claude Code, Cursor, OpenCode, etc. already share). This is the brief's "shared memory with editors" value prop. Set to `true` to opt into the v0.1.0 behaviour: a per-profile silo at `<hermes_home>/icm/<profile>.db`. Profile isolation requires `isolated: true`.
+- **`use_embeddings`** *(bool, default `false`)* — when `false`, `icm recall` runs with `--no-embeddings` (keyword-only) so the hot path stays under the default 2000 ms read timeout on Pi-class hardware. Set to `true` to enable semantic recall via the configured icm embedding model. Note: on Pi 4 the multilingual-e5-base ONNX model loads from scratch on every subprocess invocation (~50 s); v0.2's `icm-serve` MCP transport will amortize this.
+
+**Limitation.** Writes (`sync_turn` → bounded queue → daemon worker) still require a concrete `_db_path`, so under the default `isolated: false` the worker no-ops and writes are dropped silently. Operators who need writes today should set `isolated: true`. Shared-DB writes against the canonical icm file (concurrent-writer semantics with editors) is a v0.2 concern. See [CHANGELOG.md](./CHANGELOG.md) for the full migration note.
+
 ## Development
 
 Contributions welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev install, the lint / type-check / test loop, the coverage gate, and the TDD policy.
