@@ -45,3 +45,6 @@ _bmad-output/test-artifacts/
 
 # OS
 Thumbs.db
+
+# Claude Code session artifacts (logs, caches, worktrees)
+.claude/

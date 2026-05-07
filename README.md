@@ -2,7 +2,7 @@
 
 A [Hermes Agent](https://hermes-agent.nousresearch.com/) memory plugin backed by [ICM](https://github.com/rtk-ai/icm) — semantic, cross-session, cross-editor recall via the same SQLite database your editors already use.
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE) ![Coverage: 95%](https://img.shields.io/badge/coverage-95%25-brightgreen) ![Version: 0.3.0](https://img.shields.io/badge/version-0.3.0-blue)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](./LICENSE) ![Coverage: 95%](https://img.shields.io/badge/coverage-95%25-brightgreen) ![Version: 0.3.1](https://img.shields.io/badge/version-0.3.1-blue)
 
 ## Why
 
@@ -112,7 +112,7 @@ Two paths into the same database:
 - **Cross-platform by inheritance.** Linux + macOS, x86_64 + aarch64. Tested on Debian, Fedora, and the 4 GB Raspberry Pi 4.
 - **Profile-isolated when you want it.** Default is shared with editors (`isolated: false`); flip on `isolated: true` for per-profile silos at `<hermes_home>/icm/<profile>.db`.
 - **Non-blocking writes.** `sync_turn` returns within milliseconds; the agent's turn loop never waits on disk or subprocess I/O. Bounded queue + drop-on-full + lazy-respawn.
-- **Apache-2.0, no vendor lock-in.** Thin replaceable adapter on the Hermes side; ICM is open source upstream.
+- **BSD-3-Clause, no vendor lock-in.** Thin replaceable adapter on the Hermes side; ICM is open source upstream.
 
 ## Configuration
 
@@ -203,7 +203,7 @@ The project follows BMAD ceremony for non-trivial changes: every story runs `/bm
 
 ## License
 
-Apache-2.0 — see [LICENSE](./LICENSE).
+BSD 3-Clause "New" or "Revised" License — see [LICENSE](./LICENSE).
 
 ## Links
 

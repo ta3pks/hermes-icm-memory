@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-05-07
+
+**License change — Apache-2.0 → BSD 3-Clause "New" or "Revised" License.**
+
+### Changed
+
+- **LICENSE** replaced with the canonical BSD 3-Clause text (filled with
+  `Copyright (c) 2026, Nikos Efthias`). GitHub auto-detects as
+  `BSD-3-Clause`.
+- **README**, **CONTRIBUTING.md**, project metadata updated to reflect
+  the new license. Badge, "Features" bullet, "License" section, and
+  contributor agreement all point at BSD 3-Clause.
+
+### Removed
+
+- **NOTICE file** — Apache-2.0–specific convention; not used by BSD 3-Clause.
+
+### Migration
+
+This is a license change, not a code change — no behavioural impact.
+Downstream users who pinned hermes-icm-memory under Apache-2.0 should
+review whether BSD 3-Clause is acceptable for their project. The two
+licenses are similar in spirit (permissive, attribution-required), but
+BSD 3-Clause adds the no-endorsement clause and drops the Apache patent
+grant — consult counsel if patent posture matters to your use case.
+
 ## [0.3.0] — 2026-05-07
 
 **Architecture pivot — hermes-native MCP for tools, lifecycle-only plugin.**

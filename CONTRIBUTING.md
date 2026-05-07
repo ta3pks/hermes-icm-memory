@@ -60,4 +60,4 @@ Story files under `_bmad-output/implementation-artifacts/` document the test pla
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the project's [Apache-2.0](./LICENSE) license.
+By contributing, you agree that your contributions are licensed under the project's [BSD 3-Clause](./LICENSE) license.
