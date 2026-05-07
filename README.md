@@ -1,170 +1,203 @@
 # hermes-icm-memory
 
-A [Hermes Agent](https://hermes-agent.nousresearch.com/) memory provider plugin backed by [ICM](https://github.com/rtk-ai/icm) — semantic, cross-session, cross-editor recall via the local `icm` CLI.
+A [Hermes Agent](https://hermes-agent.nousresearch.com/) memory plugin backed by [ICM](https://github.com/rtk-ai/icm) — semantic, cross-session, cross-editor recall via the same SQLite database your editors already use.
+
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE) ![Coverage: 95%](https://img.shields.io/badge/coverage-95%25-brightgreen) ![Version: 0.3.0](https://img.shields.io/badge/version-0.3.0-blue)
 
 ## Why
 
-Hermes forgets between sessions unless you wire up persistence yourself. Service-backed providers (mem0, Letta) need a daemon and a separate database. Meanwhile, you may already run ICM for editor memory: a single SQLite file with semantic search, hybrid recall, decay, and hooks into Claude Code, Cursor, OpenCode, Codex CLI, Copilot CLI, and Gemini. This plugin closes the loop — Hermes recalls from and writes to the *same* ICM database your editors use, with no service to run and no extra ops surface.
+Hermes forgets between sessions unless you wire up persistence yourself. Service-backed providers (mem0, Letta) want a daemon and a separate database. If you already run ICM for your editors — Claude Code, Cursor, OpenCode, Codex CLI, Gemini, Copilot — your agent should be reading and writing to that same store, not a parallel silo.
+
+This plugin closes the loop. **One SQLite file. Shared with your editors. No service to run.**
 
 ## Quickstart
 
-Three steps, under five minutes on a machine where `icm` is already installed.
+Three steps, under five minutes if `icm` is already on your `$PATH`.
 
-1. **Verify `icm` is on your PATH.**
+**1. Verify ICM is installed.**
 
-   ```bash
-   icm --version
-   ```
-
-   Expected: a version string (e.g. `icm 0.x.y`). If the command is not found, install ICM first from <https://github.com/rtk-ai/icm>.
-
-2. **Install the plugin.**
-
-   ```bash
-   pip install hermes-icm-memory
-   ```
-
-   Until the first PyPI release, install from source instead:
-
-   ```bash
-   pip install git+https://github.com/ta3pks/hermes-icm-memory.git
-   ```
-
-   Expected: pip reports `Successfully installed hermes-icm-memory-<version>`.
-
-3. **Enable and activate inside Hermes.**
-
-   ```bash
-   hermes plugins enable hermes-icm-memory && hermes memory setup icm
-   ```
-
-   Then add `mcp_servers.icm:` to `~/.hermes/config.yaml` so the LLM can
-   call `icm_memory_recall`, `icm_memory_store`, `icm_memory_list_topics`,
-   and `icm_memory_health` tools natively (auto-discovered from
-   `icm serve`):
-
-   ```yaml
-   mcp_servers:
-     icm:
-       command: icm
-       args: [serve, --no-embeddings]   # or omit --no-embeddings on fast hosts
-       timeout: 120
-       connect_timeout: 30
-   ```
-
-   Expected: Hermes reports the plugin enabled and the `icm` memory provider configured. New sessions will now recall from ICM at startup and write decisions, errors-resolved, preferences, and task summaries back to ICM after every turn — non-blockingly. The plugin auto-injects recalled memories into the system prompt every turn (via the `prefetch` lifecycle hook); the LLM gets `icm_memory_*` tools on demand from the hermes-native MCP server.
-
-## Architecture (v0.3)
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                       hermes-gateway                            │
-│                                                                 │
-│  ┌──────────────────────┐         ┌──────────────────────────┐  │
-│  │ memory_manager       │         │ mcp_servers.icm          │  │
-│  │ (lifecycle hooks)    │         │ (long-lived ``icm serve``)│  │
-│  │                      │         │                          │  │
-│  │ ┌──────────────────┐ │         │ ┌──────────────────────┐ │  │
-│  │ │hermes-icm-memory │ │         │ │ icm_memory_recall    │ │  │
-│  │ │  (this plugin)   │ │         │ │ icm_memory_store     │ │  │
-│  │ │                  │ │         │ │ icm_memory_list_topics│ │  │
-│  │ │ • prefetch()     │ │         │ │ icm_memory_health    │ │  │
-│  │ │ • system_prompt_ │ │         │ └──────────────────────┘ │  │
-│  │ │   block()        │ │         │     ▲ JSON-RPC           │  │
-│  │ │ • sync_turn()    │ │         │     │ (LLM tool calls)   │  │
-│  │ │ • shutdown()     │ │         └─────┼────────────────────┘  │
-│  │ └────────┬─────────┘ │               │                       │
-│  └───────────┼──────────┘               │                       │
-│              │ icm subprocess           │                       │
-│              │ (keyword recall, store)  │                       │
-└──────────────┼──────────────────────────┼───────────────────────┘
-               ▼                          ▼
-         ┌──────────────────────────────────┐
-         │   icm SQLite DB (shared)         │
-         │   ~/.local/share/icm/memories.db │
-         └──────────────────────────────────┘
+```bash
+icm --version    # expected: e.g. "icm 0.10.43"
 ```
 
-The plugin owns **lifecycle**: auto-prefetch on prompt-submit
-(`prefetch()` → cached hits → `system_prompt_block()` prepended into
-every turn's system prompt) and auto-store on triggered turns
-(`sync_turn()` → bounded queue → daemon worker → fresh `icm` subprocess
-per write). Hermes-native `mcp_servers.icm:` owns **tool exposure**:
-the LLM calls `icm_memory_*` directly through hermes' MCP client, with
-the embedding model warm-cached in the long-lived `icm serve` daemon.
+If not found, install from <https://github.com/rtk-ai/icm>.
 
-## Features
+**2. Install the plugin.**
 
-- **Shared memory with editors, not a parallel silo.** Anything Hermes learns is immediately searchable from Claude Code, OpenCode, Codex, etc., and vice versa.
-- **No service to run.** `icm` is a CLI; the plugin shells out. Nothing to systemctl, no port to defend, no Docker.
-- **Decay model + hybrid recall built in.** Temporal decay, semantic + keyword fusion, importance levels, and consolidation come from ICM upstream — the plugin inherits all of it.
-- **Cross-platform by inheritance.** Works wherever ICM does (x86_64 + aarch64 on Fedora, Debian, macOS).
-- **Profile-isolated.** All paths derive from `kwargs['hermes_home']`; multiple Hermes profiles get their own ICM database with no leakage.
-- **Non-blocking writes.** `sync_turn` returns within milliseconds; the agent's turn loop never waits on disk or subprocess I/O.
-- **Apache-2.0, no vendor lock-in.** Thin replaceable adapter on the Hermes side; ICM is open source upstream.
+```bash
+pip install git+https://github.com/ta3pks/hermes-icm-memory.git
+```
 
-## Configuration
+(PyPI release pending; install from source for now.)
 
-User-tunable keys (importance default, recall limit, queue size, timeouts, prefetch toggle, etc.) are documented in [`_bmad-output/planning-artifacts/architecture.md`](./_bmad-output/planning-artifacts/architecture.md) §10.1. Configure via `hermes memory setup icm` or by editing the Hermes memory provider config for your profile.
+**3. Wire it into Hermes.**
 
-### v0.1.1 — sharing vs. isolation, embeddings vs. keyword-only
-
-Two keys control the trade-offs surfaced by the Pi 4 deploy on 2026-05-06; both default to the safer-for-most-users option:
-
-- **`isolated`** *(bool, default `false`)* — when `false`, the plugin omits `--db` and lets `icm` use its canonical OS-default database (the same SQLite file Claude Code, Cursor, OpenCode, etc. already share). This is the brief's "shared memory with editors" value prop. Set to `true` to opt into the v0.1.0 behaviour: a per-profile silo at `<hermes_home>/icm/<profile>.db`. Profile isolation requires `isolated: true`.
-- **`use_embeddings`** *(bool, default `true`)* — when `true`, `icm recall` uses semantic search via the configured icm embedding model (the Brief's value prop). Set to `false` on Pi-class hardware or anywhere the multilingual-e5-base ONNX model load (~50 s per subprocess invocation on a 4 GB Pi 4) blows past `command_timeout_read_ms`. Desktop / cloud hosts handle the default fine.
-
-### v0.3 — hermes-native MCP for tools, lifecycle-only plugin
-
-The v0.2 `transport: mcp` config was removed. Hermes-Agent v0.3.0+
-ships first-class `mcp_servers.<name>:` config — hermes itself spawns
-`icm serve`, completes the JSON-RPC handshake, auto-discovers tools,
-and registers them alongside built-ins. The plugin's responsibility
-shrank to lifecycle hooks (which only it can do):
-
-- **`prefetch` + `system_prompt_block`** — auto-injection of recalled
-  memories into the system prompt every turn. Uses fresh `icm` keyword
-  subprocesses (sub-100 ms on Pi when `use_embeddings: false`).
-- **`sync_turn`** — non-blocking trigger detection + bounded-queue daemon
-  writer (FIFO, drop-on-full per AD-04, lazy-respawn AD-15).
-- **`shutdown`** — explicit no-op so hermes' `memory_manager` stops
-  logging "object has no attribute 'shutdown'" on every gateway
-  restart.
-
-LLM-side semantic recall is handled by `mcp_servers.icm:`: the
-embedding model loads once at hermes startup, every subsequent
-`icm_memory_recall` call is sub-second. See the migration note in
-[CHANGELOG.md](./CHANGELOG.md) for upgrading from v0.2.
-
-**Pi recipe.** Add this to your `~/.hermes/config.yaml`:
+Add the following to `~/.hermes/config.yaml`:
 
 ```yaml
-plugins:
-  hermes-icm-memory:
-    use_embeddings: false        # plugin's prefetch hot-path: keyword-only
+memory:
+  provider: hermes-icm-memory          # auto-prefetch + auto-store lifecycle hooks
 
 mcp_servers:
   icm:
-    command: icm
-    args: [serve]                # LLM tool path: warm semantic cache
+    command: icm                       # gives the LLM ~30 native icm_memory_* tools
+    args: [serve]                      # add --no-embeddings on Pi-class hardware
     timeout: 120
     connect_timeout: 30
 ```
 
-The plugin's prefetch fires keyword recall (fast on Pi); the LLM's
-on-demand semantic recall flows through the warm-cache hermes daemon.
-Best of both worlds, zero plugin-side daemon management.
+Then enable the plugin and restart hermes-gateway:
 
-**Limitation.** Writes (`sync_turn` → bounded queue → daemon worker)
-still require a concrete `_db_path`, so under the default
-`isolated: false` the worker no-ops and writes are dropped silently.
-Operators who need plugin-side writes today should set `isolated: true`.
-Shared-DB writes against the canonical icm file (concurrent-writer
-semantics with editors) is a v0.4 concern.
+```bash
+hermes plugins enable hermes-icm-memory
+systemctl --user restart hermes-gateway   # or however you run it
+```
+
+You should see in the gateway log:
+
+```
+INFO tools.mcp_tool: MCP server 'icm' (stdio): registered N tool(s): mcp_icm_icm_memory_recall, mcp_icm_icm_memory_store, ...
+INFO agent.memory_manager: Memory provider 'icm' registered
+```
+
+That's it. Every new turn auto-prefetches recalled memories into the system prompt; every triggered turn auto-writes back to ICM in the background; the LLM can call `icm_memory_recall` / `icm_memory_store` / `icm_memory_*` directly when it wants explicit control.
+
+## Architecture (v0.3)
+
+The plugin owns the **lifecycle hooks** — auto-injection on prompt-submit, auto-store on triggered turns. Hermes-native `mcp_servers.icm:` owns **tool exposure** — the LLM gets the full `icm` MCP surface (recall, store, memoirs, feedback, transcripts, learn, consolidate, ~30 tools total) with the embedding model warm-cached in a long-lived `icm serve` daemon.
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                       hermes-gateway                           │
+│                                                                │
+│  ┌────────────────────────┐      ┌─────────────────────────┐   │
+│  │ memory_manager         │      │ mcp_servers.icm         │   │
+│  │ (lifecycle hooks)      │      │ (long-lived icm serve)  │   │
+│  │                        │      │                         │   │
+│  │ ┌────────────────────┐ │      │  • icm_memory_recall    │   │
+│  │ │ hermes-icm-memory  │ │      │  • icm_memory_store     │   │
+│  │ │  (this plugin)     │ │      │  • icm_memoir_*         │   │
+│  │ │                    │ │      │  • icm_feedback_*       │   │
+│  │ │ • prefetch()       │ │      │  • icm_transcript_*     │   │
+│  │ │ • system_prompt_   │ │      │  • icm_learn            │   │
+│  │ │     block()        │ │      │  • …~30 tools           │   │
+│  │ │ • sync_turn()      │ │      │                         │   │
+│  │ │ • shutdown()       │ │      │     ▲ JSON-RPC          │   │
+│  │ └────────┬───────────┘ │      │     │ (LLM tool calls)  │   │
+│  └──────────┼─────────────┘      └─────┼───────────────────┘   │
+│             │ icm subprocess           │                       │
+│             │ (keyword recall, store)  │                       │
+└─────────────┼──────────────────────────┼───────────────────────┘
+              ▼                          ▼
+        ┌────────────────────────────────────┐
+        │   icm SQLite DB (shared)           │
+        │   ~/.local/share/icm/memories.db   │
+        └────────────────────────────────────┘
+```
+
+Two paths into the same database:
+
+- **Plugin-side (auto-injection).** `prefetch()` runs a fresh keyword `icm recall` per turn, caches the hits, and `system_prompt_block()` formats them into the prompt prepend. Sub-100 ms on a 4 GB Pi 4 with `use_embeddings: false`. The LLM sees the recalled memories without ever calling a tool.
+- **LLM-side (on-demand).** When the LLM wants to search semantically, fetch a memoir, or consolidate explicitly, it calls `icm_memory_*` directly through hermes' MCP client. The embedding model lives in the persistent `icm serve` daemon, so warm calls return in 100–250 ms even on Pi.
+
+## Features
+
+- **Shared memory with editors, not a parallel silo.** Anything Hermes learns is searchable from Claude Code, OpenCode, Codex CLI, Gemini, etc., and vice versa.
+- **No service to run.** `icm` is a CLI; the plugin shells out for hot-path writes/reads, hermes manages the long-lived MCP daemon. Nothing to systemctl yourself, no port to defend, no Docker.
+- **Decay model + hybrid recall built in.** Temporal decay, semantic + keyword fusion, importance levels, and consolidation come from ICM upstream — the plugin inherits all of it.
+- **Cross-platform by inheritance.** Linux + macOS, x86_64 + aarch64. Tested on Debian, Fedora, and 4 GB Raspberry Pi 4.
+- **Profile-isolated when you want it.** Default is shared with editors (`isolated: false`); flip on `isolated: true` for per-profile silos at `<hermes_home>/icm/<profile>.db`.
+- **Non-blocking writes.** `sync_turn` returns within milliseconds; the agent's turn loop never waits on disk or subprocess I/O. Bounded queue + drop-on-full + lazy-respawn.
+- **Apache-2.0, no vendor lock-in.** Thin replaceable adapter on the Hermes side; ICM is open source upstream.
+
+## Configuration
+
+Plugin config goes under `plugins.hermes-icm-memory:` in `~/.hermes/config.yaml`. All keys have defaults; you only set what you want to override.
+
+### Hot-path config
+
+| Key                  | Type    | Default  | What it does                                                       |
+| -------------------- | ------- | -------- | ------------------------------------------------------------------ |
+| `prefetch_enabled`   | bool    | `true`   | Auto-inject recalled memories into the system prompt every turn.    |
+| `recall_limit`       | int     | `5`      | Max hits for prefetch.                                             |
+| `use_embeddings`     | bool    | `true`   | Semantic recall on the plugin's CLI subprocess path. **Set `false` on Pi-class hardware** — the ONNX model cold-loads per fresh subprocess (~50 s on Pi). |
+| `isolated`           | bool    | `false`  | `false` = share `icm` canonical DB with editors. `true` = per-profile silo at `<hermes_home>/icm/<profile>.db`. |
+
+### Worker / write-path config
+
+| Key                          | Type | Default | What it does                              |
+| ---------------------------- | ---- | ------- | ----------------------------------------- |
+| `default_importance`         | enum | `high`  | Importance for sync_turn-triggered writes (`critical` / `high` / `medium` / `low`). |
+| `topic_prefix`               | str  | `""`    | Prefix prepended to all auto-stored topics (e.g., `"hermes-"`). |
+| `sync_write_queue_size`      | int  | `64`    | Bounded queue capacity. Producer drops with one WARNING per overflow burst. |
+| `command_timeout_read_ms`    | int  | `2000`  | Read timeout for `icm recall` subprocess. |
+| `command_timeout_write_ms`   | int  | `5000`  | Write timeout for `icm store` subprocess. |
+| `session_end_grace_ms`       | int  | `1500`  | Grace period for the worker to drain on session end. |
+| `periodic_progress_every_n_turns` | int | `12` | Heartbeat-store cadence. |
+| `consolidate_on_session_end` | bool | `false` | Run `icm consolidate` on session end. |
+
+### Recipes
+
+**Pi 4 (4 GB) or other slow hosts:**
+
+```yaml
+plugins:
+  hermes-icm-memory:
+    use_embeddings: false      # plugin's prefetch hot-path: keyword-only, sub-100 ms
+
+mcp_servers:
+  icm:
+    command: icm
+    args: [serve, --no-embeddings]   # LLM tool path: also keyword-only on Pi
+    timeout: 120
+    connect_timeout: 30
+```
+
+For semantic recall on Pi, run an `icm embed` cron on a faster machine (e.g., a Fedora workstation) that pulls and embeds the Pi's DB nightly, then pushes back. See [`docs/pi-embed-cron.md`](./docs/pi-embed-cron.md) if you need the full pattern.
+
+**Desktop / cloud (no resource constraint):**
+
+```yaml
+# plugins.hermes-icm-memory: leave unset; defaults are fine
+
+mcp_servers:
+  icm:
+    command: icm
+    args: [serve]              # warm semantic cache for LLM tool calls
+    timeout: 120
+    connect_timeout: 30
+```
+
+## Migrating from v0.2
+
+The v0.2 `transport: mcp` config key was removed in v0.3 — hermes' first-class `mcp_servers.<name>:` (added in hermes-agent v0.3.0) replaces the plugin's duplicate transport. Three steps:
+
+1. **Delete** `plugins.hermes-icm-memory.transport` from `~/.hermes/config.yaml`. (The plugin now ignores this key as a forward-compat passthrough; deleting it just removes a dead line.)
+2. **Add** `mcp_servers.icm:` per the recipes above if it's not already there.
+3. **Restart** hermes-gateway. The LLM now calls hermes-native `icm_memory_*` tools instead of the plugin's old `icm_*` wrappers. Auto-injection on prompt-submit is unchanged.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
+
+## Known limitations
+
+- **Writes need a concrete `_db_path` until v0.4.** Under the recommended `isolated: false` (shared DB), `_db_path` is `None` and the write worker no-ops. Auto-store via `sync_turn` is silently dropped. If you need plugin-side writes today, set `isolated: true` to restore the v0.1.0 per-profile silo. The LLM can still write via `icm_memory_store` (hermes-native MCP) — that path works in shared mode. Concurrent-writer semantics with editors against the canonical SQLite file is the v0.4 design problem.
+- **Windows is unsupported.** `icm serve` spawning + signal handling tested on Linux + macOS only.
 
 ## Development
 
-Contributions welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev install, the lint / type-check / test loop, the coverage gate, and the TDD policy.
+Contributions welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev install, the lint / type-check / test loop, and the TDD policy.
+
+```bash
+git clone https://github.com/ta3pks/hermes-icm-memory
+cd hermes-icm-memory
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest -q --cov=hermes_icm_memory --cov-branch --cov-fail-under=85
+ruff check .
+mypy --strict hermes_icm_memory tests
+```
+
+The project follows BMAD ceremony for non-trivial changes: every story runs `/bmad-create-story` → `/bmad-dev-story` → `/bmad-code-review` → `/simplify`. Story specs live under `_bmad-output/implementation-artifacts/`.
 
 ## License
 
@@ -173,5 +206,6 @@ Apache-2.0 — see [LICENSE](./LICENSE).
 ## Links
 
 - ICM (upstream memory store): <https://github.com/rtk-ai/icm>
+- Hermes Agent: <https://hermes-agent.nousresearch.com/>
 - Hermes plugin docs: <https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins>
-- Hermes memory-provider docs: <https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers>
+- Hermes memory-provider docs: <https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin>

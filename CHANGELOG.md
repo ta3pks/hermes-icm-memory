@@ -7,20 +7,11 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.3.0] — 2026-05-07
 
-Architecture pivot — hermes-native MCP for tools, lifecycle-only plugin.
-Hermes-Agent v0.3.0 (March 17, 2026) shipped first-class
-`mcp_servers.<name>:` config; this release deletes the plugin's duplicate
-`transport: mcp` machinery so hermes is the single source of truth for
-`icm` tool exposure to the LLM, and the plugin's value-add is reduced to
-what only it can do — auto-prefetch on prompt-submit and auto-store on
-triggered turns.
+**Architecture pivot — hermes-native MCP for tools, lifecycle-only plugin.**
 
-The non-negotiable: **auto-injection of recalled memories into the
-system-prompt prepend is preserved** — `prefetch()` + `system_prompt_block()`
-stay. They now run via fresh keyword-only `icm` subprocesses on the hot
-path (sub-100 ms on Pi); LLM-driven semantic recall comes from
-hermes-native `mcp_servers.icm:` (long-lived `icm serve` daemon, warm
-embedding-model cache).
+Hermes-Agent v0.3.0 (March 2026) shipped first-class `mcp_servers.<name>:` config. This release deletes the plugin's duplicate `transport: mcp` machinery so hermes is the single source of truth for `icm` tool exposure, and the plugin keeps only what it alone can do: auto-injection of recalled memories on prompt-submit (`prefetch()` → `system_prompt_block()`) and auto-store on triggered turns (`sync_turn()`).
+
+Net diff: **−2484 lines** of code. Auto-injection contract preserved bit-for-bit. The LLM now sees ~30 native `icm_memory_*` / `icm_memoir_*` / `icm_feedback_*` / `icm_transcript_*` / `icm_learn` / `icm_consolidate` tools instead of the plugin's previous 4-tool wrapper surface.
 
 ### Removed
 
@@ -111,13 +102,10 @@ embedding-model cache).
 
 ### Limitations / Out of scope
 
-- Honcho memory provider integration (unrelated; hermes 0.3.0 ships its
-  own).
-- Replacing the bounded-queue worker with hermes' own async write
-  infrastructure (potential v0.4).
-- A "shared icm serve" mode where the plugin reuses hermes' MCP-managed
-  daemon for prefetch (would couple plugin to hermes internals; rejected
-  — keyword-only CLI is fast enough on Pi).
+- **Plugin-side writes still require a concrete `_db_path`.** Under the recommended `isolated: false` (shared DB) the worker no-ops and `sync_turn` writes are silently dropped — same v0.1.1 limitation. Set `isolated: true` to restore plugin writes today; the LLM can still write via `icm_memory_store` over hermes-native MCP. Concurrent-writer semantics against the canonical icm SQLite file is a v0.4 problem.
+- **Honcho memory provider integration** (unrelated; hermes 0.3.0 ships its own).
+- **Reusing hermes' MCP-managed daemon for plugin-side prefetch** (would couple the plugin to hermes internals; rejected — keyword-only CLI is fast enough on Pi).
+- **Replacing the bounded-queue worker** with hermes' async write infrastructure (potential v0.4).
 
 ## [0.2.0] — 2026-05-06
 
