@@ -25,14 +25,18 @@ If not found, install from <https://github.com/rtk-ai/icm>.
 **2. Install the plugin.**
 
 ```bash
+pip install hermes-icm-memory
+```
+
+PyPI release pending; until then install from source instead:
+
+```bash
 pip install git+https://github.com/ta3pks/hermes-icm-memory.git
 ```
 
-(PyPI release pending; install from source for now.)
-
 **3. Wire it into Hermes.**
 
-Add the following to `~/.hermes/config.yaml`:
+The `hermes memory setup icm` wizard walks you through it, or you can do it by hand — add the following to `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
