@@ -52,10 +52,10 @@ Net diff: **−2484 lines** of code. Auto-injection contract preserved bit-for-b
   now includes the exception text in the format string itself (e.g.
   `"prefetch failed: %r"` with `exc` as positional arg) **in addition to**
   the existing `extra={"err": repr(exc), ...}`. The default Python
-  logging formatter does not render `extra={...}` — the Pi outage on
-  2026-05-06 was undebuggable until this was hand-patched. AD-13's
-  structured logs stay (for operators using JSON log formatters), but
-  the human-readable exception text is now also present.
+  logging formatter does not render `extra={...}`, which made silent-
+  degrade incidents undiagnosable in the field. AD-13's structured logs
+  stay (for operators using JSON log formatters), but the human-readable
+  exception text is now also present.
 - **New invariant tests** —
   `tests/test_no_tool_surface.py` pins that the provider has no
   `handle_tool_call` / `get_tool_schemas` and `tools.py` is deleted from
@@ -68,10 +68,10 @@ Net diff: **−2484 lines** of code. Auto-injection contract preserved bit-for-b
 - **`config.get_default_schema()` returns twelve entries** (down from 13);
   the v0.2 `transport` enum is removed (AC2).
 - **`hooks.run_prefetch` always uses CLI subprocess.** With
-  `use_embeddings: false` (the recommended Pi setting for the prefetch
-  hot-path) each call is < 100 ms — fine for the prompt-prepend hot
-  path. Semantic recall on demand is delivered by hermes-native
-  `mcp_servers.icm:` when the LLM calls `icm_memory_recall`.
+  `use_embeddings: false` (recommended on resource-constrained hosts)
+  each call stays well under any reasonable read timeout. Semantic
+  recall on demand is delivered by hermes-native `mcp_servers.icm:`
+  when the LLM calls `icm_memory_recall`.
 
 ### Migration from v0.2
 
@@ -104,14 +104,14 @@ Net diff: **−2484 lines** of code. Auto-injection contract preserved bit-for-b
 
 - **Plugin-side writes still require a concrete `_db_path`.** Under the recommended `isolated: false` (shared DB) the worker no-ops and `sync_turn` writes are silently dropped — same v0.1.1 limitation. Set `isolated: true` to restore plugin writes today; the LLM can still write via `icm_memory_store` over hermes-native MCP. Concurrent-writer semantics against the canonical icm SQLite file is a v0.4 problem.
 - **Honcho memory provider integration** (unrelated; hermes 0.3.0 ships its own).
-- **Reusing hermes' MCP-managed daemon for plugin-side prefetch** (would couple the plugin to hermes internals; rejected — keyword-only CLI is fast enough on Pi).
+- **Reusing hermes' MCP-managed daemon for plugin-side prefetch** (would couple the plugin to hermes internals; rejected — keyword-only CLI is fast enough on the hot path).
 - **Replacing the bounded-queue worker** with hermes' async write infrastructure (potential v0.4).
 
 ## [0.2.0] — 2026-05-06
 
 `icm-serve` MCP transport — amortize the embedding-model load across calls.
-Pi-class hosts can now run semantic recall: first call ~50 s (warmup),
-every subsequent recall ~50 ms.
+Resource-constrained hosts can now run semantic recall: first call pays
+the model warmup cost once, every subsequent recall is sub-second.
 
 ### Added
 
@@ -162,20 +162,22 @@ every subsequent recall ~50 ms.
   per-call `timeout_ms` budget elapses; same upstream degrade as a
   CLI-path timeout.
 
-### Pi-friendly recipe
+### Recipe for resource-constrained hosts
 
 Add this to your Hermes memory-provider config to get fast semantic
-recall on Pi-class hardware (4 GB Raspberry Pi 4 or similar):
+recall on hosts where the embedding-model cold-load on each fresh
+subprocess would exceed `command_timeout_read_ms`:
 
 ```yaml
 transport: mcp
 use_embeddings: true
 ```
 
-First recall: ~50 s (model cold-start). Every subsequent recall: <1 s.
-Operators on desktop / cloud can leave both settings at default —
-`transport: cli` + `use_embeddings: true` already gets them semantic
-recall with no behavioural change from v0.1.1.
+First recall pays the model cold-start; every subsequent recall is
+sub-second. Operators on hosts with no resource constraint can leave
+both settings at default — `transport: cli` + `use_embeddings: true`
+already gets them semantic recall with no behavioural change from
+v0.1.1.
 
 ### Migration from v0.1.1
 
@@ -192,15 +194,15 @@ bit-for-bit.
   carry-over from v0.1.1's "shared-DB writes need a v0.3 review"
   position. Operators wanting MCP-mediated writes today should set
   `isolated: true`.
-- Auto-detection of Pi-class hardware (to default to `mcp` there) is a
-  v0.3 concern.
+- Auto-detection of host capability (to default to `mcp` on slow hosts)
+  is a v0.3 concern.
 - Windows is unsupported. `icm serve` spawning + signal handling tested
   on Linux + macOS only.
 
 ## [0.1.1] — 2026-05-06
 
-Pi-deployment fixes + restoration of the brief's "shared memory with editors"
-value prop.
+Resource-constrained-host fixes + restoration of the brief's "shared memory
+with editors" value prop.
 
 ### Changed (default-flip — see Migration below)
 
@@ -210,16 +212,16 @@ value prop.
   OS-canonical default DB — the same SQLite file Claude Code, Cursor,
   OpenCode, Codex CLI, etc. already share. Recovers the original brief's
   promise: "Shared memory with editors, not a parallel silo."
-- **`icm recall` runs semantic search by default; Pi users opt out.**
+- **`icm recall` runs semantic search by default; slow-host operators opt out.**
   The new `use_embeddings` config key defaults to `true` (the Brief's
   value prop — semantic recall via the multilingual-e5-base ONNX model).
-  Set to `false` to fall back to keyword-only recall. The Pi 4 deploy
+  Set to `false` to fall back to keyword-only recall. Field deployment
   surfaced the trade-off: the ONNX model loads from scratch on every
-  subprocess invocation (~50 s on a 4 GB Pi 4), which blows past the
-  default 2000 ms read timeout. Pi-class operators should set
-  `use_embeddings: false` in their hermes config until v0.2's
-  `icm-serve` MCP transport amortizes the model load. Desktop / cloud
-  hosts are fine with the default.
+  subprocess invocation, which on resource-constrained hosts blows past
+  the default 2000 ms read timeout. Such operators should set
+  `use_embeddings: false` until v0.2's `icm-serve` MCP transport
+  amortizes the model load. Hosts without that resource constraint are
+  fine with the default.
 
 ### Added
 
@@ -227,9 +229,8 @@ value prop.
   restore the v0.1.0 silo behaviour (`<hermes_home>/icm/<profile>.db`
   per-profile DB path, `--db` forwarded, profile isolation enforced).
 - New config key `use_embeddings` (bool, default `true`). Set to `false`
-  on Pi-class hardware (or any host that can't sustain the ONNX cold
-  start inside `command_timeout_read_ms`) to fall back to keyword-only
-  recall.
+  on any host that can't sustain the ONNX model cold-start inside
+  `command_timeout_read_ms` to fall back to keyword-only recall.
 - `cli_runner.run_recall` accepts `use_embeddings: bool = True` kwarg
   (keyword-only) and conditionally appends `--no-embeddings` when
   ``False``.
@@ -275,16 +276,17 @@ Hermes memory-provider config to restore it:
 isolated: true
 ```
 
-If you're on Pi-class hardware (4 GB Raspberry Pi 4 or similar where the
-ONNX model load blows past `command_timeout_read_ms`), additionally set:
+If your host can't sustain the ONNX model cold-start inside
+`command_timeout_read_ms`, additionally set:
 
 ```yaml
-# Pi-class escape hatch — keyword-only recall
+# Escape hatch for resource-constrained hosts — keyword-only recall
 use_embeddings: false
 ```
 
-Desktop / cloud hosts are fine with the default `use_embeddings: true`
-and gain the Brief's semantic-recall value prop out of the box.
+Hosts with no such constraint are fine with the default
+`use_embeddings: true` and gain the Brief's semantic-recall value prop
+out of the box.
 
 ## [0.1.0] — 2026-05-05
 

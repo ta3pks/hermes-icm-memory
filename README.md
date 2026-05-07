@@ -41,7 +41,7 @@ memory:
 mcp_servers:
   icm:
     command: icm                       # gives the LLM ~30 native icm_memory_* tools
-    args: [serve]                      # add --no-embeddings on Pi-class hardware
+    args: [serve]                      # add --no-embeddings on resource-constrained hosts
     timeout: 120
     connect_timeout: 30
 ```
@@ -97,15 +97,15 @@ The plugin owns the **lifecycle hooks** — auto-injection on prompt-submit, aut
 
 Two paths into the same database:
 
-- **Plugin-side (auto-injection).** `prefetch()` runs a fresh keyword `icm recall` per turn, caches the hits, and `system_prompt_block()` formats them into the prompt prepend. Sub-100 ms on a 4 GB Pi 4 with `use_embeddings: false`. The LLM sees the recalled memories without ever calling a tool.
-- **LLM-side (on-demand).** When the LLM wants to search semantically, fetch a memoir, or consolidate explicitly, it calls `icm_memory_*` directly through hermes' MCP client. The embedding model lives in the persistent `icm serve` daemon, so warm calls return in 100–250 ms even on Pi.
+- **Plugin-side (auto-injection).** `prefetch()` runs a fresh keyword `icm recall` per turn, caches the hits, and `system_prompt_block()` formats them into the prompt prepend. The LLM sees the recalled memories without ever calling a tool.
+- **LLM-side (on-demand).** When the LLM wants to search semantically, fetch a memoir, or consolidate explicitly, it calls `icm_memory_*` directly through hermes' MCP client. The embedding model lives in the persistent `icm serve` daemon, so warm calls stay sub-second.
 
 ## Features
 
 - **Shared memory with editors, not a parallel silo.** Anything Hermes learns is searchable from Claude Code, OpenCode, Codex CLI, Gemini, etc., and vice versa.
 - **No service to run.** `icm` is a CLI; the plugin shells out for hot-path writes/reads, hermes manages the long-lived MCP daemon. Nothing to systemctl yourself, no port to defend, no Docker.
 - **Decay model + hybrid recall built in.** Temporal decay, semantic + keyword fusion, importance levels, and consolidation come from ICM upstream — the plugin inherits all of it.
-- **Cross-platform by inheritance.** Linux + macOS, x86_64 + aarch64. Tested on Debian, Fedora, and 4 GB Raspberry Pi 4.
+- **Cross-platform by inheritance.** Linux + macOS, x86_64 + aarch64.
 - **Profile-isolated when you want it.** Default is shared with editors (`isolated: false`); flip on `isolated: true` for per-profile silos at `<hermes_home>/icm/<profile>.db`.
 - **Non-blocking writes.** `sync_turn` returns within milliseconds; the agent's turn loop never waits on disk or subprocess I/O. Bounded queue + drop-on-full + lazy-respawn.
 - **Apache-2.0, no vendor lock-in.** Thin replaceable adapter on the Hermes side; ICM is open source upstream.
@@ -120,7 +120,7 @@ Plugin config goes under `plugins.hermes-icm-memory:` in `~/.hermes/config.yaml`
 | -------------------- | ------- | -------- | ------------------------------------------------------------------ |
 | `prefetch_enabled`   | bool    | `true`   | Auto-inject recalled memories into the system prompt every turn.    |
 | `recall_limit`       | int     | `5`      | Max hits for prefetch.                                             |
-| `use_embeddings`     | bool    | `true`   | Semantic recall on the plugin's CLI subprocess path. **Set `false` on Pi-class hardware** — the ONNX model cold-loads per fresh subprocess (~50 s on Pi). |
+| `use_embeddings`     | bool    | `true`   | Semantic recall on the plugin's CLI subprocess path. **Set `false` if the embedding-model cold-load on a fresh subprocess exceeds your `command_timeout_read_ms`** — the prefetch hot path then runs keyword-only and stays well under any reasonable timeout. |
 | `isolated`           | bool    | `false`  | `false` = share `icm` canonical DB with editors. `true` = per-profile silo at `<hermes_home>/icm/<profile>.db`. |
 
 ### Worker / write-path config
@@ -138,35 +138,33 @@ Plugin config goes under `plugins.hermes-icm-memory:` in `~/.hermes/config.yaml`
 
 ### Recipes
 
-**Pi 4 (4 GB) or other slow hosts:**
+**Default (most hosts).** Defaults are fine; just register `mcp_servers.icm:` so the LLM has the icm tools:
+
+```yaml
+mcp_servers:
+  icm:
+    command: icm
+    args: [serve]              # long-lived daemon, warm embedding cache
+    timeout: 120
+    connect_timeout: 30
+```
+
+**Resource-constrained hosts** (single-board computers, low-RAM VMs — anything where the embedding model cold-load exceeds `command_timeout_read_ms`). Disable embeddings on both paths so every recall stays keyword-only:
 
 ```yaml
 plugins:
   hermes-icm-memory:
-    use_embeddings: false      # plugin's prefetch hot-path: keyword-only, sub-100 ms
+    use_embeddings: false      # plugin's prefetch hot-path: keyword-only
 
 mcp_servers:
   icm:
     command: icm
-    args: [serve, --no-embeddings]   # LLM tool path: also keyword-only on Pi
+    args: [serve, --no-embeddings]
     timeout: 120
     connect_timeout: 30
 ```
 
-For semantic recall on Pi, run an `icm embed` cron on a faster machine (e.g., a Fedora workstation) that pulls and embeds the Pi's DB nightly, then pushes back. See [`docs/pi-embed-cron.md`](./docs/pi-embed-cron.md) if you need the full pattern.
-
-**Desktop / cloud (no resource constraint):**
-
-```yaml
-# plugins.hermes-icm-memory: leave unset; defaults are fine
-
-mcp_servers:
-  icm:
-    command: icm
-    args: [serve]              # warm semantic cache for LLM tool calls
-    timeout: 120
-    connect_timeout: 30
-```
+If you want semantic recall on a slow host, run `icm embed` on a faster machine against the same SQLite file (rsync / SSHFS / shared NFS) so the embeddings get computed off the hot path.
 
 ## Migrating from v0.2
 
