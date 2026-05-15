@@ -166,6 +166,7 @@ def classifier_loop(
     write_queue: queue.Queue[WriteTask],
     endpoint: str,
     model: str,
+    api_key: str,
     timeout_s: float,
     stop_event: threading.Event,
 ) -> None:
@@ -186,6 +187,7 @@ def classifier_loop(
                 task.assistant_text,
                 endpoint=endpoint,
                 model=model,
+                api_key=api_key,
                 timeout_s=timeout_s,
             )
         except Exception as exc:
@@ -302,6 +304,7 @@ def ensure_classifier(
     classify_queue_size: int,
     endpoint: str,
     model: str,
+    api_key: str,
     timeout_s: float,
 ) -> bool:
     """Create the classify queue + spawn the classifier worker.
@@ -316,7 +319,7 @@ def ensure_classifier(
         state.classify_queue = queue.Queue(maxsize=classify_queue_size)
 
     if state.class_worker is None:
-        state.class_worker = _spawn_classifier(state, endpoint, model, timeout_s)
+        state.class_worker = _spawn_classifier(state, endpoint, model, api_key, timeout_s)
         return True
 
     if not state.class_worker.is_alive():
@@ -329,7 +332,7 @@ def ensure_classifier(
             return False
         state.class_respawn_count += 1
         state.stop_event.clear()
-        state.class_worker = _spawn_classifier(state, endpoint, model, timeout_s)
+        state.class_worker = _spawn_classifier(state, endpoint, model, api_key, timeout_s)
         logger.warning(
             "classifier: respawned after death",
             extra={"class_respawn_count": state.class_respawn_count},
@@ -342,6 +345,7 @@ def _spawn_classifier(
     state: WorkerState,
     endpoint: str,
     model: str,
+    api_key: str,
     timeout_s: float,
 ) -> threading.Thread:
     """Construct and start a fresh daemon classifier worker."""
@@ -354,6 +358,7 @@ def _spawn_classifier(
             "write_queue": state.write_queue,
             "endpoint": endpoint,
             "model": model,
+            "api_key": api_key,
             "timeout_s": timeout_s,
             "stop_event": state.stop_event,
         },

@@ -29,6 +29,8 @@ import threading
 from pathlib import Path
 from typing import Any, Final
 
+import yaml
+
 from . import cli_runner, config, hooks
 
 __all__ = ["IcmMemoryProvider"]
@@ -62,6 +64,8 @@ class IcmMemoryProvider:
         self._available: bool | None = None
         self._config: dict[str, Any] = {}
         self._session_id: str | None = None
+        self._hermes_home: Path | None = None
+        self._hermes_config: dict[str, Any] = {}
         # ``(session_id, str(hermes_home), profile)`` — set by initialize and
         # used to detect an idempotent re-init with the same arguments. Also
         # serves as the "have we initialised at all" flag (None == no).
@@ -142,6 +146,8 @@ class IcmMemoryProvider:
 
         self._session_id = session_id
         self._init_args = args_key
+        self._hermes_home = Path(hermes_home)
+        self._hermes_config = self._read_hermes_config()
 
         # v0.4 — start the warm MCP daemon for all subsequent CLI calls.
         try:
@@ -258,24 +264,133 @@ class IcmMemoryProvider:
             write_timeout_ms=self._config_int("command_timeout_write_ms"),
         )
 
+    def _read_hermes_config(self) -> dict[str, Any]:
+        """Parse the Hermes config.yaml into a dict.
+
+        Returns ``{}`` on any failure (file missing, bad YAML).
+        """
+        if not self._hermes_home:
+            return {}
+        config_path = self._hermes_home / "config.yaml"
+        try:
+            with open(config_path) as f:
+                parsed = yaml.safe_load(f)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception as exc:
+            logger.debug(
+                "hermes_config: could not read: %r",
+                exc,
+                extra={"path": str(config_path), "err": repr(exc)},
+            )
+            return {}
+
+    def _resolve_classifier_config(self) -> dict[str, str] | None:
+        """Resolve classifier endpoint, model, and API key from Hermes config.
+
+        Priority:
+        1. ``classifier_endpoint`` plugin config — overrides everything when set
+        2. ``classifier_provider`` + ``classifier_model`` plugin config
+        3. Fall back to main ``model.provider`` + ``model.default`` from config.yaml
+
+        Returns ``{"endpoint": ..., "model": ..., "api_key": ...}`` or ``None``
+        if resolution fails.
+        """
+        # Step 1: explicit endpoint override
+        explicit_endpoint = self._config_str("classifier_endpoint")
+        explicit_model = self._config_str("classifier_model")
+
+        if explicit_endpoint and explicit_model:
+            api_key = os.environ.get("HERMES_CLASSIFIER_API_KEY", "")
+            if not api_key:
+                api_key = os.environ.get("OPENROUTER_API_KEY", "")
+            return {
+                "endpoint": explicit_endpoint,
+                "model": explicit_model,
+                "api_key": api_key,
+            }
+
+        # Step 2: resolve from Hermes provider config
+        cfg = self._hermes_config
+        main_model = cfg.get("model") or {}
+
+        provider = self._config_str("classifier_provider") or main_model.get("provider", "")
+        model = self._config_str("classifier_model") or main_model.get("default", "")
+
+        if not provider or not model:
+            logger.debug(
+                "classifier: could not resolve provider/model",
+                extra={"provider": provider, "model": model},
+            )
+            return None
+
+        # Step 3: find the base_url for this provider
+        base_url = ""
+        # Check if it's the main provider
+        main_provider = main_model.get("provider", "")
+        if provider == main_provider:
+            base_url = main_model.get("base_url", "")
+        else:
+            provider_config = (cfg.get("providers") or {}).get(provider, {})
+            base_url = provider_config.get("base_url", "")
+
+        if not base_url:
+            logger.debug(
+                "classifier: no base_url for provider %r",
+                provider,
+                extra={"provider": provider},
+            )
+            return None
+
+        # Step 4: construct the chat completions endpoint URL
+        endpoint = base_url.rstrip("/")
+        if not endpoint.endswith("/chat/completions") and not endpoint.endswith("/v1"):
+            endpoint = endpoint + "/chat/completions"
+        elif endpoint.endswith("/v1") and not endpoint.endswith("/chat/completions"):
+            endpoint = endpoint + "/chat/completions"
+
+        # Step 5: find the API key
+        api_key = ""
+        # Check env var by provider name convention
+        env_var = f"{provider.upper().replace('-', '_')}_API_KEY"
+        api_key = os.environ.get(env_var, "")
+        # Try the main provider's env var if different
+        if not api_key:
+            api_key = os.environ.get("OPENROUTER_API_KEY", "")
+
+        return {
+            "endpoint": endpoint,
+            "model": model,
+            "api_key": api_key,
+        }
+
     def _ensure_classifier(self) -> bool:
         """Lazy-spawn / respawn the classifier; returns False if misconfigured."""
         # Classifier needs the write queue to exist first.
         if self._worker_state.write_queue is None:
             return False
-        endpoint = self._config_str("classifier_endpoint")
-        model = self._config_str("classifier_model")
+
+        resolved = self._resolve_classifier_config()
+        if resolved is None:
+            logger.debug("classifier: disabled — could not resolve config")
+            return False
+
+        endpoint = resolved["endpoint"]
+        model = resolved["model"]
+        api_key = resolved["api_key"]
+
         if not endpoint or not model:
             logger.debug(
-                "classifier: disabled — endpoint or model empty in config",
+                "classifier: disabled — endpoint or model empty",
                 extra={"endpoint": endpoint, "model": model},
             )
             return False
+
         return hooks.ensure_classifier(
             self._worker_state,
             classify_queue_size=self._config_int("classify_queue_size"),
             endpoint=endpoint,
             model=model,
+            api_key=api_key,
             timeout_s=self._config_int("classifier_timeout_ms") / 1000.0,
         )
 

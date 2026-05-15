@@ -171,16 +171,16 @@ _SCHEMA_ENTRIES: Final[list[dict[str, Any]]] = [
         ),
     },
     {
-        "key": "classifier_endpoint",
+        "key": "classifier_provider",
         "type": "string",
         "default": "",
         "secret": False,
         "required": False,
         "description": (
-            "HTTP endpoint for the classifier LLM. Expected to accept POST "
-            "with {\"model\": ..., \"prompt\": ..., \"stream\": false} and "
-            "return {\"response\": \"...\"}. Must be set when classifier_enabled "
-            "is true. Example: http://localhost:11434/api/generate for Ollama."
+            "Provider name for the classifier LLM. Empty string means "
+            "use the main model.provider from the Hermes config.yaml. "
+            "The provider's base_url and API key are resolved from the "
+            "same Hermes provider config."
         ),
     },
     {
@@ -190,8 +190,22 @@ _SCHEMA_ENTRIES: Final[list[dict[str, Any]]] = [
         "secret": False,
         "required": False,
         "description": (
-            "Model name to use for the classifier. Small models (1B–4B) "
-            "work well. Must be set when classifier_enabled is true."
+            "Model name for the classifier LLM. Empty string means "
+            "use the main model.default from the Hermes config.yaml. "
+            "Small models (1B-4B) work well for classification."
+        ),
+    },
+    {
+        "key": "classifier_endpoint",
+        "type": "string",
+        "default": "",
+        "secret": False,
+        "required": False,
+        "description": (
+            "Explicit HTTP endpoint for the classifier LLM. When set, "
+            "overrides the provider-resolved endpoint. Accepts POST with "
+            "OpenAI-compatible chat completions format. "
+            "Empty = resolve from classifier_provider."
         ),
     },
     {

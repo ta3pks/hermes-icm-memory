@@ -1,12 +1,10 @@
 """LLM-based exchange classifier — async memory-trigger detection (v0.4+).
 
-Calls a configurable LLM endpoint (Ollama-compatible API) to decide whether
-a conversation exchange is worth storing in ICM. Runs in the background
-classifier worker thread — never blocks the turn loop.
+Calls a configurable LLM endpoint using the OpenAI-compatible chat completions
+format (``POST /chat/completions``). The endpoint, model, and API key are resolved
+from the Hermes provider config — no separate auth setup needed.
 
-The endpoint is expected to expose the Ollama ``POST /api/generate`` API,
-but any endpoint that accepts ``{"model": ..., "prompt": ..., "stream": false}``
-and returns ``{"response": "..."}`` will work.
+Runs in the background classifier worker thread — never blocks the turn loop.
 """
 
 from __future__ import annotations
@@ -26,8 +24,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Prompt template sent to the LLM. Instructs JSON-only output.
-_CLASSIFIER_PROMPT: str = """\
+#: System prompt sent to the classifier LLM. Instructs JSON-only output.
+_SYSTEM_PROMPT: str = """\
 You are a memory classifier. Given a conversation exchange, determine if \
 there is anything worth remembering long-term.
 
@@ -45,11 +43,7 @@ If something worth storing:
 
 Topic must be one of: preferences, decisions, errors-resolved, learnings, context
 Importance must be one of: critical, high, medium, low
-Content should be concise (max 200 chars).
-
-Exchange:
-User: {user_text}
-Assistant: {assistant_text}"""
+Content should be concise (max 200 chars)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,36 +74,55 @@ def classify_exchange(
     *,
     endpoint: str,
     model: str,
+    api_key: str = "",
     timeout_s: float = 8.0,
 ) -> ClassifierResult | None:
     """Call the LLM endpoint and parse the classification result.
 
+    Uses the OpenAI-compatible chat completions format. ``endpoint`` should be
+    the full URL (e.g. ``https://api.openai.com/v1/chat/completions``).
+
     Returns ``None`` when the LLM decides nothing is worth storing, or on
     any network/parse failure (degrade gracefully — never raises).
     """
-    prompt = _CLASSIFIER_PROMPT.format(
-        user_text=user_text[:1500],  # cap input to avoid token blowup
-        assistant_text=assistant_text[:2000],
+    user_message = (
+        f"Exchange:\n"
+        f"User: {user_text[:1500]}\n"
+        f"Assistant: {assistant_text[:2000]}"
     )
 
     payload = json.dumps(
         {
             "model": model,
-            "prompt": prompt,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
             "stream": False,
-            "format": "json",
         }
     ).encode("utf-8")
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     try:
         req = urllib.request.Request(
             endpoint,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        logger.debug(
+            "classifier: HTTP %d: %s",
+            exc.code,
+            exc.reason,
+            extra={"endpoint": endpoint, "model": model, "err": repr(exc)},
+        )
+        return None
     except urllib.error.URLError as exc:
         logger.debug(
             "classifier: endpoint unreachable: %r",
@@ -133,13 +146,23 @@ def classify_exchange(
         )
         return None
 
-    # Parse the Ollama response.
+    # Parse the OpenAI chat completions response.
     try:
         body = json.loads(raw)
-        response_text = body.get("response", "")
+        if "error" in body:
+            logger.debug(
+                "classifier: API error: %s",
+                body["error"],
+                extra={"endpoint": endpoint, "model": model},
+            )
+            return None
+        choices = body.get("choices") or []
+        if not choices:
+            return None
+        response_text = (choices[0].get("message") or {}).get("content", "")
         if not response_text:
             return None
-    except (json.JSONDecodeError, KeyError) as exc:
+    except (json.JSONDecodeError, KeyError, IndexError) as exc:
         logger.debug(
             "classifier: unparseable response: %r",
             exc,
@@ -148,8 +171,20 @@ def classify_exchange(
         return None
 
     # Parse the structured JSON from the LLM's response text.
+    # Strip markdown code fences if present.
+    clean = response_text.strip()
+    if clean.startswith("```"):
+        # Remove opening fence (```json, ```, etc.) and closing fence
+        first_newline = clean.find("\n")
+        if first_newline != -1:
+            clean = clean[first_newline + 1 :]
+        if clean.endswith("```"):
+            clean = clean[:-3].strip()
+        elif clean.endswith("``"):
+            clean = clean[:-2].strip()
+
     try:
-        decision = json.loads(response_text)
+        decision = json.loads(clean)
     except json.JSONDecodeError:
         logger.debug(
             "classifier: LLM output not JSON: %.200s",
