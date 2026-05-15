@@ -312,18 +312,11 @@ def test_save_config_without_hermes_home_skips_disk_write() -> None:
 def test_on_session_end_does_not_invoke_subprocess(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``on_session_end`` no longer manages an icm-serve daemon (AC1).
+    """``on_session_end`` gracefully handles the daemon teardown (v0.4).
 
-    Pins that no AttributeError is raised because someone left a stale
-    ``cli_runner.mcp_stop`` call in the teardown path.
+    Pins that ``on_session_end`` is safe to call even when no MCP daemon
+    was started (no AttributeError, no subprocess traffic).
     """
-    from hermes_icm_memory import cli_runner
-
-    # If a stale mcp_stop reference survived the v0.3 trim, monkeypatching
-    # it would surface — but the attribute itself must be absent now.
-    assert not hasattr(cli_runner, "mcp_stop")
-    assert not hasattr(cli_runner, "mcp_start")
-
     provider = IcmMemoryProvider()
     # Must not raise even though there is no daemon and no worker yet.
     provider.on_session_end()

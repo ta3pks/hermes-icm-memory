@@ -157,6 +157,59 @@ _SCHEMA_ENTRIES: Final[list[dict[str, Any]]] = [
             "per turn. Desktop / cloud hosts are fine with the default."
         ),
     },
+    # ---- v0.4 classifier additions -----------------------------------------
+    {
+        "key": "classifier_enabled",
+        "type": "bool",
+        "default": False,
+        "secret": False,
+        "required": False,
+        "description": (
+            "If true, use an LLM to classify each turn for "
+            "memory-worthy content instead of regex patterns. "
+            "The LLM runs asynchronously in a background worker."
+        ),
+    },
+    {
+        "key": "classifier_endpoint",
+        "type": "string",
+        "default": "",
+        "secret": False,
+        "required": False,
+        "description": (
+            "HTTP endpoint for the classifier LLM. Expected to accept POST "
+            "with {\"model\": ..., \"prompt\": ..., \"stream\": false} and "
+            "return {\"response\": \"...\"}. Must be set when classifier_enabled "
+            "is true. Example: http://localhost:11434/api/generate for Ollama."
+        ),
+    },
+    {
+        "key": "classifier_model",
+        "type": "string",
+        "default": "",
+        "secret": False,
+        "required": False,
+        "description": (
+            "Model name to use for the classifier. Small models (1B–4B) "
+            "work well. Must be set when classifier_enabled is true."
+        ),
+    },
+    {
+        "key": "classifier_timeout_ms",
+        "type": "int",
+        "default": 8000,
+        "secret": False,
+        "required": False,
+        "description": "Timeout for the classifier LLM call.",
+    },
+    {
+        "key": "classify_queue_size",
+        "type": "int",
+        "default": 32,
+        "secret": False,
+        "required": False,
+        "description": "Bounded queue capacity for pending classifications.",
+    },
 ]
 
 #: Per-key minimum integer values. Keys absent from this map have no lower bound
@@ -169,6 +222,8 @@ _INT_MIN: Final[dict[str, int]] = {
     "command_timeout_write_ms": 1,
     "session_end_grace_ms": 0,
     "periodic_progress_every_n_turns": 1,
+    "classifier_timeout_ms": 100,
+    "classify_queue_size": 1,
 }
 
 #: Module-level lookup table built once at import. Used by :func:`validate`.

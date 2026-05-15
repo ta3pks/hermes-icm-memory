@@ -12,6 +12,7 @@ the rest of the package — it must remain a leaf in the dependency graph.
 from __future__ import annotations
 
 __all__ = [
+    "ICMConnectionError",
     "ICMError",
     "ICMMalformedOutputError",
     "ICMNonZeroExitError",
@@ -34,6 +35,10 @@ class ICMTimeoutError(ICMError):
 
 class ICMNonZeroExitError(ICMError):
     """Raised when ``icm`` exits with a non-zero return code; ``args[0]`` carries stderr."""
+
+
+class ICMConnectionError(ICMError):
+    """Raised when MCP transport cannot connect, is interrupted, or returns an error."""
 
 
 class ICMMalformedOutputError(ICMError):

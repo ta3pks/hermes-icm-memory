@@ -43,13 +43,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import cli_runner, mapping
+from . import cli_runner, classifier, mapping
 from .errors import ICMError
 
+# Re-export so consumers can import either from hooks or classifier.
+ClassifyTask = classifier.ClassifyTask
+
 __all__ = [
+    "ClassifyTask",
     "WriteTask",
     "WorkerState",
+    "classifier_loop",
     "drain_with_grace",
+    "ensure_classifier",
     "ensure_worker",
     "format_block",
     "run_prefetch",
@@ -82,9 +88,9 @@ class WorkerState:
     """Mutable worker-state bundle held by the provider.
 
     A single dataclass keeps the related fields adjacent — the producer
-    (``submit_triggers``) and the consumer (``worker_loop``) both read+write
-    a subset, and grouping them here removes scattered instance attributes
-    from :class:`IcmMemoryProvider`.
+    (``submit_triggers``) and the consumers (``worker_loop``,
+    ``classifier_loop``) both read+write a subset, and grouping them here
+    removes scattered instance attributes from :class:`IcmMemoryProvider`.
     """
 
     write_queue: queue.Queue[WriteTask] | None = None
@@ -94,6 +100,12 @@ class WorkerState:
     respawn_count: int = 0
     writes_disabled: bool = False
     turn_index: int = 0
+
+    # v0.4 — classifier worker (async LLM-based trigger detection).
+    classify_queue: queue.Queue[classifier.ClassifyTask] | None = None
+    class_worker: threading.Thread | None = None
+    class_respawn_count: int = 0
+    class_disabled: bool = False
 
 
 # ---------- Worker loop ------------------------------------------------------
@@ -143,6 +155,74 @@ def worker_loop(
         finally:
             write_queue.task_done()
             overflow_burst[0] = False
+
+
+# ---------- Classifier loop ----------------------------------------------------
+
+
+def classifier_loop(
+    *,
+    classify_queue: queue.Queue[classifier.ClassifyTask],
+    write_queue: queue.Queue[WriteTask],
+    endpoint: str,
+    model: str,
+    timeout_s: float,
+    stop_event: threading.Event,
+) -> None:
+    """Background classifier worker. Drains the classify queue, calls the LLM,
+    and enqueues ``WriteTask`` when the LLM returns something to store.
+
+    Never raises — every failure is caught locally and degraded to a DEBUG log.
+    """
+    while not stop_event.is_set():
+        try:
+            task = classify_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+
+        try:
+            result = classifier.classify_exchange(
+                task.user_text,
+                task.assistant_text,
+                endpoint=endpoint,
+                model=model,
+                timeout_s=timeout_s,
+            )
+        except Exception as exc:
+            logger.debug(
+                "classifier: unexpected error: %r",
+                exc,
+                extra={"err": repr(exc)},
+            )
+            classify_queue.task_done()
+            continue
+
+        if result is None:
+            classify_queue.task_done()
+            continue
+
+        # LLM wants to store something — enqueue a write task.
+        write_task = WriteTask(
+            topic=result.topic,
+            importance=result.importance,
+            content=result.content,
+            keywords=result.keywords,
+        )
+        try:
+            write_queue.put_nowait(write_task)
+        except queue.Full:
+            logger.debug(
+                "classifier: write queue full; dropping classified memory",
+                extra={"topic": result.topic},
+            )
+        except Exception as exc:
+            logger.debug(
+                "classifier: enqueue failed: %r",
+                exc,
+                extra={"err": repr(exc), "topic": result.topic},
+            )
+
+        classify_queue.task_done()
 
 
 # ---------- Worker lifecycle helpers ----------------------------------------
@@ -207,6 +287,77 @@ def _spawn_worker(
             "stop_event": state.stop_event,
         },
         name="hermes-icm-writer",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+# ---------- Classifier lifecycle helpers ------------------------------------
+
+
+def ensure_classifier(
+    state: WorkerState,
+    *,
+    classify_queue_size: int,
+    endpoint: str,
+    model: str,
+    timeout_s: float,
+) -> bool:
+    """Create the classify queue + spawn the classifier worker.
+
+    Returns ``True`` when the classifier is running on exit, ``False`` when
+    classifier is disabled (post-second-death).
+    """
+    if state.class_disabled:
+        return False
+
+    if state.classify_queue is None:
+        state.classify_queue = queue.Queue(maxsize=classify_queue_size)
+
+    if state.class_worker is None:
+        state.class_worker = _spawn_classifier(state, endpoint, model, timeout_s)
+        return True
+
+    if not state.class_worker.is_alive():
+        if state.class_respawn_count >= 1:
+            state.class_disabled = True
+            logger.critical(
+                "classifier: second death — classifier disabled",
+                extra={"class_respawn_count": state.class_respawn_count},
+            )
+            return False
+        state.class_respawn_count += 1
+        state.stop_event.clear()
+        state.class_worker = _spawn_classifier(state, endpoint, model, timeout_s)
+        logger.warning(
+            "classifier: respawned after death",
+            extra={"class_respawn_count": state.class_respawn_count},
+        )
+
+    return True
+
+
+def _spawn_classifier(
+    state: WorkerState,
+    endpoint: str,
+    model: str,
+    timeout_s: float,
+) -> threading.Thread:
+    """Construct and start a fresh daemon classifier worker."""
+    assert state.classify_queue is not None
+    assert state.write_queue is not None
+    thread = threading.Thread(
+        target=classifier_loop,
+        kwargs={
+            "classify_queue": state.classify_queue,
+            "write_queue": state.write_queue,
+            "endpoint": endpoint,
+            "model": model,
+            "timeout_s": timeout_s,
+            "stop_event": state.stop_event,
+        },
+        name="hermes-icm-classifier",
         daemon=True,
     )
     thread.start()
@@ -318,16 +469,35 @@ def submit_triggers(
     assistant_content: str,
     project: str | None,
     every_n_turns: int,
+    classifier_enabled: bool = False,
 ) -> None:
     """``sync_turn`` body: detect → enqueue → drop on full with one WARN per burst.
+
+    Two modes:
+    1. **Classifier mode** (``classifier_enabled=True``): enqueue a
+       :class:`ClassifyTask` for async LLM-based classification. The
+       background classifier worker calls the LLM and may enqueue a
+       :class:`WriteTask` if the exchange is worth remembering.
+    2. **Regex mode** (default): use :func:`mapping.detect_triggers` to
+       produce inline write tasks (existing v0.3 behaviour).
 
     Delegated to from :meth:`IcmMemoryProvider.sync_turn` so the provider
     method stays a thin wrapper that owns only state lookup. Catches
     broadly at the boundary; never raises.
     """
-    if state.writes_disabled or state.write_queue is None:
+    if state.writes_disabled:
         return
     state.turn_index += 1
+
+    if classifier_enabled:
+        _submit_classify_task(state, user_content, assistant_content, project)
+        # Also fire periodic progress check regardless of content.
+        _submit_periodic_context(state, turn_index=state.turn_index, every_n_turns=every_n_turns, project=project)
+        return
+
+    # Regex path (existing behaviour).
+    if state.write_queue is None:
+        return
     try:
         triggers = mapping.detect_triggers(
             user_content,
@@ -361,6 +531,60 @@ def submit_triggers(
                 exc,
                 extra={"err": repr(exc), "topic": topic},
             )
+
+
+def _submit_classify_task(
+    state: WorkerState,
+    user_content: str,
+    assistant_content: str,
+    project: str | None,
+) -> None:
+    """Enqueue a ``ClassifyTask`` — drop on full with DEBUG log."""
+    if state.classify_queue is None or state.class_disabled:
+        return
+    task = classifier.ClassifyTask(
+        user_text=user_content,
+        assistant_text=assistant_content,
+        project=project,
+    )
+    try:
+        state.classify_queue.put_nowait(task)
+    except queue.Full:
+        logger.debug("sync_turn: classify queue full; dropping exchange")
+    except Exception as exc:
+        logger.debug(
+            "sync_turn: classify enqueue error: %r",
+            exc,
+            extra={"err": repr(exc)},
+        )
+
+
+def _submit_periodic_context(
+    state: WorkerState,
+    *,
+    turn_index: int,
+    every_n_turns: int,
+    project: str | None,
+) -> None:
+    """Fire periodic progress checkpoint via the write queue."""
+    if state.write_queue is None:
+        return
+    if every_n_turns <= 0 or turn_index <= 0 or turn_index % every_n_turns != 0:
+        return
+    topic = mapping.MAPPING["context"]["topic_template"].format(project=project or "default")
+    importance = mapping.MAPPING["context"]["importance"]
+    content = f"periodic progress checkpoint: turn {turn_index}"
+    task = WriteTask(topic=topic, importance=importance, content=content, keywords=())
+    try:
+        state.write_queue.put_nowait(task)
+    except queue.Full:
+        _warn_overflow_once(state)
+    except Exception as exc:
+        logger.warning(
+            "sync_turn: periodic enqueue error: %r",
+            exc,
+            extra={"err": repr(exc)},
+        )
 
 
 def _warn_overflow_once(state: WorkerState) -> None:

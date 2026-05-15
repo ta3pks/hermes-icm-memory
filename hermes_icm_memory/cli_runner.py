@@ -2,285 +2,146 @@
 
 Architecture compliance:
 
-* AD-12 / NFR-MAINT-2 — ``cli_runner`` is the **only** module under
-  ``hermes_icm_memory/`` that imports ``subprocess``. Every public ``run_*``
-  here uses ``subprocess.run`` (one-shot CLI invocations only — the v0.2 MCP
-  transport was removed in v0.3 because hermes-agent v0.3.0 owns the
-  ``mcp_servers.<name>:`` surface natively).
-* AD-19 / NFR-SEC-3 — list-form argv only; never ``shell=True``; user-supplied
-  values (query, topic, content) flow as discrete argv elements.
+* AD-12 / NFR-MAINT-2 — ``cli_runner`` (and ``mcp_client.py``) are the **only**
+  modules under ``hermes_icm_memory/`` that import ``subprocess``.
+* AD-19 / NFR-SEC-3 — list-form argv only; never ``shell=True``.
 * AD-08 / NFR-PERF-3 — every public ``run_*`` carries a ``timeout_ms``
-  parameter that is forwarded to ``subprocess.run`` as ``timeout=ms / 1000``.
+  parameter.
 * AD-07 — ``cli_runner`` itself never degrades: it raises typed exceptions
   from ``errors.py``. Upstream callers (``hooks.py`` / ``provider.py``) catch
   ``ICMError`` and produce the documented degrade response.
-* AD-13 / NFR-OBS-2 — every invocation logs at DEBUG with redacted argv and
-  elapsed milliseconds via ``extra={...}`` (no f-string interpolation).
 
-Manager directive (binding, verified on icm 0.10.43): ``--format json`` is
-supported only on ``icm recall`` — NOT on ``icm topics`` or ``icm health``.
-``run_topics`` / ``run_health`` therefore parse the aligned-table /
-``key: value`` stdout into shapes equivalent to what JSON would have given.
+v0.4 — The internal subprocess transport has been replaced with a warm MCP
+daemon (:class:`mcp_client.IcmMcpClient`). The public ``run_*`` surface is
+preserved so ``hooks.py`` and ``provider.py`` require no changes.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import re
-import subprocess  # AD-12: ONLY import in the package.
-import time
 from pathlib import Path
 from typing import Any
 
-from .errors import (
-    ICMMalformedOutputError,
-    ICMNonZeroExitError,
-    ICMNotFoundError,
-    ICMTimeoutError,
-)
+from . import mcp_client
+from .errors import ICMConnectionError, ICMNotFoundError
 
 __all__ = [
+    "mcp_start",
+    "mcp_stop",
     "run_health",
     "run_recall",
     "run_store",
     "run_topics",
 ]
 
-logger = logging.getLogger("hermes_icm_memory.cli_runner")
+logger = logging.getLogger(__name__)
 
-# Redaction policy (AC5): truncate any argv token longer than this to its
-# first (LIMIT - 1) chars + a single ellipsis, so the redacted token length
-# stays bounded by LIMIT. The test ``test_debug_log_emits_redacted_argv``
-# pins the ``len(tok) <= 80`` invariant.
-_ARG_TRUNCATE_LIMIT = 80
-_TRUNCATE_MARKER = "…"  # single-char horizontal ellipsis ("…")
-_STDOUT_SNIPPET = 200
-
-_COL_SPLIT = re.compile(r"\s{2,}")
+#: Module-level MCP daemon shared across all ``run_*`` calls.
+#: Lazy-started by ``mcp_start``; torn down by ``mcp_stop``.
+_client: mcp_client.IcmMcpClient | None = None
 
 
-def _redact_argv(argv: list[str]) -> list[str]:
-    """Truncate any argv token longer than ``_ARG_TRUNCATE_LIMIT`` chars."""
-    redacted: list[str] = []
-    for token in argv:
-        if len(token) > _ARG_TRUNCATE_LIMIT:
-            redacted.append(token[: _ARG_TRUNCATE_LIMIT - 1] + _TRUNCATE_MARKER)
-        else:
-            redacted.append(token)
-    return redacted
+# ------------------------------------------------------------------ lifecycle
 
 
-def _run(argv: list[str], timeout_ms: int) -> subprocess.CompletedProcess[str]:
-    """Invoke ``icm`` and translate every documented failure into a typed error.
+def mcp_start(
+    db_path: Path | None = None,
+    use_embeddings: bool = False,
+) -> None:
+    """Start (or ensure running) the MCP daemon.
 
-    Always emits one DEBUG log entry with the redacted argv and elapsed_ms.
-    Raises ``ICMNotFoundError`` / ``ICMTimeoutError`` / ``ICMNonZeroExitError``
-    from ``errors.py``; never catches ``Exception`` broadly.
+    Module-level singleton: the first call spawns ``icm serve``; subsequent
+    calls are no-ops. Raises ``ICMNotFoundError`` if ``icm`` is missing,
+    or ``ICMConnectionError`` if the MCP handshake fails.
     """
-    started = time.monotonic()
+    global _client  # noqa: PLW0603
+    if _client is not None:
+        return
     try:
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_ms / 1000,
-            check=False,
-            shell=False,
-        )
+        cl = mcp_client.IcmMcpClient()
+        cl.start(db_path=db_path, use_embeddings=use_embeddings)
+        _client = cl
     except FileNotFoundError as exc:
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        logger.debug(
-            "icm invocation: not found",
-            extra={"argv": _redact_argv(argv), "elapsed_ms": elapsed_ms},
-        )
+        _client = None
         raise ICMNotFoundError(str(exc)) from exc
-    except subprocess.TimeoutExpired as exc:
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        logger.debug(
-            "icm invocation: timeout",
-            extra={"argv": _redact_argv(argv), "elapsed_ms": elapsed_ms},
-        )
-        raise ICMTimeoutError(str(exc)) from exc
-
-    elapsed_ms = int((time.monotonic() - started) * 1000)
-    logger.debug(
-        "icm invocation: complete",
-        extra={
-            "argv": _redact_argv(argv),
-            "elapsed_ms": elapsed_ms,
-            "returncode": proc.returncode,
-        },
-    )
-    if proc.returncode != 0:
-        raise ICMNonZeroExitError(proc.stderr or f"icm exited with {proc.returncode}")
-    return proc
+    except ICMConnectionError:
+        _client = None
+        raise
+    except OSError as exc:
+        _client = None
+        raise ICMConnectionError(str(exc)) from exc
 
 
-def _db_args(db_path: Path | None) -> list[str]:
-    """Return ``["--db", str(path)]`` when set, else ``[]`` (icm uses canonical default).
+def mcp_stop() -> None:
+    """Shut down the MCP daemon (no-op if not running)."""
+    global _client  # noqa: PLW0603
+    if _client is not None:
+        _client.close()
+        _client = None
 
-    Omitting ``--db`` lets icm pick its OS-default location (e.g. XDG-resolved
-    ``~/.local/share/icm/memories.db`` on Linux), which is the same database
-    Claude Code, Cursor, OpenCode, etc. share. Passing an explicit ``db_path``
-    isolates the plugin into a separate file (opt-in profile isolation).
-    """
-    return ["--db", str(db_path)] if db_path is not None else []
+
+# ------------------------------------------------------------------ public helpers
+
+
+def _get_client() -> mcp_client.IcmMcpClient:
+    """Return the global client or raise ``ICMConnectionError``."""
+    if _client is None:
+        raise ICMConnectionError("MCP client not started — call mcp_start first")
+    if not _client.is_available():
+        raise ICMConnectionError("MCP client is disabled after repeated failures")
+    return _client
 
 
 def run_recall(
     query: str,
     limit: int,
-    db_path: Path | None,
-    timeout_ms: int,
+    db_path: Path | None,  # noqa: ARG001 — kept for API compat; MCP owns its DB path
+    timeout_ms: int,  # noqa: ARG001 — MCP has its own timeout; kept for API compat
     *,
-    use_embeddings: bool = True,
+    use_embeddings: bool = True,  # noqa: ARG001 — kept for API compat
     topic: str | None = None,
     project: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Run ``icm recall`` and return the parsed list of hits.
+    """Run ``icm recall`` via the MCP daemon and return the parsed list of hits.
 
-    ``use_embeddings`` controls whether ``--no-embeddings`` is appended to argv:
-
-    * ``True`` (default, v0.1.1) — omits the flag so ``icm`` uses its configured
-      embedding model and runs full semantic search.
-    * ``False`` — appends ``--no-embeddings`` for keyword-only recall. This is
-      the recommended Pi-class setting for ``prefetch`` (sub-100 ms keyword
-      recall on the prompt-prepend hot path); semantic recall on Pi is
-      delivered separately by the hermes-native ``mcp_servers.icm:`` daemon.
+    ``db_path``, ``timeout_ms``, and ``use_embeddings`` are accepted for API
+    compatibility with v0.3 callers but are managed by the MCP daemon's startup
+    config.
     """
-    argv: list[str] = [
-        "icm",
-        *_db_args(db_path),
-        "recall",
-        query,
-        "--limit",
-        str(limit),
-        "--format",
-        "json",
-    ]
-    if not use_embeddings:
-        argv.append("--no-embeddings")
-    if topic is not None:
-        argv += ["-t", topic]
-    if project is not None:
-        argv += ["-p", project]
-
-    proc = _run(argv, timeout_ms)
-    try:
-        parsed = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise ICMMalformedOutputError(proc.stdout[:_STDOUT_SNIPPET]) from exc
-    if not isinstance(parsed, list):
-        raise ICMMalformedOutputError(proc.stdout[:_STDOUT_SNIPPET])
-    return parsed
+    cl = _get_client()
+    return cl.call_recall(query=query, limit=limit, topic=topic, project=project)
 
 
 def run_store(
     topic: str,
     content: str,
     importance: str,
-    db_path: Path | None,
-    timeout_ms: int,
+    db_path: Path | None,  # noqa: ARG001
+    timeout_ms: int,  # noqa: ARG001
     keywords: str | None = None,
-    raw: str | None = None,
+    raw: str | None = None,  # noqa: ARG001 — MCP store doesn't support raw via tools
 ) -> None:
-    """Run ``icm store``. Stdout is discarded; only ``returncode`` matters."""
-    argv: list[str] = [
-        "icm",
-        *_db_args(db_path),
-        "store",
-        "-t",
-        topic,
-        "-c",
-        content,
-        "-i",
-        importance,
-    ]
-    if keywords is not None:
-        argv += ["-k", keywords]
-    if raw is not None:
-        argv += ["-r", raw]
-    _run(argv, timeout_ms)
+    """Run ``icm store`` via the MCP daemon. Returns None on success."""
+    cl = _get_client()
+    success = cl.call_store(topic=topic, content=content, importance=importance, keywords=keywords)
+    if not success:
+        raise ICMConnectionError(f"store failed for topic {topic!r}")
 
 
 def run_topics(
-    db_path: Path | None,
-    timeout_ms: int,
+    db_path: Path | None,  # noqa: ARG001
+    timeout_ms: int,  # noqa: ARG001
 ) -> list[dict[str, Any]]:
-    """Run ``icm topics`` (no ``--format json`` — recall-only on icm 0.10.43).
-
-    Parses the aligned-table stdout: column splits on two-or-more spaces,
-    one row per line; the first row is treated as a header and used to key
-    each row's columns. Single-column output falls back to
-    ``[{"topic": <line>}, ...]``.
-    """
-    argv = ["icm", *_db_args(db_path), "topics"]
-    proc = _run(argv, timeout_ms)
-    return _parse_topics_table(proc.stdout)
+    """Run ``icm topics`` via the MCP daemon."""
+    cl = _get_client()
+    return cl.call_topics()
 
 
 def run_health(
-    db_path: Path | None,
-    timeout_ms: int,
+    db_path: Path | None,  # noqa: ARG001
+    timeout_ms: int,  # noqa: ARG001
     topic: str | None = None,
 ) -> dict[str, Any]:
-    """Run ``icm health`` (no ``--format json`` — recall-only on icm 0.10.43).
-
-    Parses ``key: value`` lines into a dict. ``-t topic`` narrows the scope.
-    Raises ``ICMMalformedOutputError`` when non-blank stdout yields zero
-    parseable lines.
-    """
-    argv: list[str] = ["icm", *_db_args(db_path), "health"]
-    if topic is not None:
-        argv += ["-t", topic]
-    proc = _run(argv, timeout_ms)
-    return _parse_health_kv(proc.stdout)
-
-
-# ---------- private parsers ---------------------------------------------------
-
-
-def _normalize_key(raw: str) -> str:
-    """Lower-case + collapse whitespace runs to underscores for dict keys."""
-    return re.sub(r"\s+", "_", raw.strip().lower())
-
-
-def _parse_topics_table(stdout: str) -> list[dict[str, Any]]:
-    """Convert ``icm topics`` aligned-table stdout into ``list[dict]``.
-
-    The exact aligned-table format is speculative against icm 0.10.43;
-    real-binary verification is S14 (integration tests). On unrecognized
-    formats we degrade to the single-column fallback rather than raising.
-    """
-    lines = [line for line in stdout.splitlines() if line.strip()]
-    if not lines:
-        return []
-
-    header_cols = [_normalize_key(c) for c in _COL_SPLIT.split(lines[0].strip())]
-    if len(header_cols) <= 1:
-        return [{"topic": line.strip()} for line in lines]
-
-    rows: list[dict[str, Any]] = []
-    for line in lines[1:]:
-        values = [v.strip() for v in _COL_SPLIT.split(line.strip())]
-        rows.append(
-            {header_cols[i]: values[i] for i in range(min(len(header_cols), len(values)))}
-        )
-    return rows
-
-
-def _parse_health_kv(stdout: str) -> dict[str, Any]:
-    """Convert ``icm health`` ``key: value`` line output into a dict."""
-    result: dict[str, Any] = {}
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if not stripped or ":" not in stripped:
-            continue
-        key, _, value = stripped.partition(":")
-        result[_normalize_key(key)] = value.strip()
-    if not result and stdout.strip():
-        raise ICMMalformedOutputError(stdout[:_STDOUT_SNIPPET])
-    return result
+    """Run ``icm health`` via the MCP daemon."""
+    cl = _get_client()
+    return cl.call_health(topic=topic)

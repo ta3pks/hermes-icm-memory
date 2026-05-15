@@ -1,14 +1,14 @@
-"""v0.3 invariant — ``cli_runner`` exposes only the CLI subprocess path (AC4, AC9).
+"""v0.4 invariants — ``cli_runner`` delegates to the MCP daemon.
 
-The v0.2 MCP transport (``mcp_start`` / ``mcp_stop`` / ``_McpDaemon`` / etc.)
-was deleted in v0.3 because hermes-agent v0.3.0+ owns the
-``mcp_servers.icm:`` surface natively. Pins:
+The v0.3 CLI-only mode has been replaced by a warm MCP daemon via
+``mcp_client.IcmMcpClient``. Pins:
 
 1. ``run_recall`` / ``run_store`` / ``run_topics`` / ``run_health`` carry
-   no ``transport=`` parameter.
-2. ``cli_runner.__all__`` does not advertise ``mcp_start`` / ``mcp_stop``.
-3. The cli_runner module text contains no ``subprocess.Popen`` call site
-   (only ``subprocess.run`` for one-shot invocations).
+   no ``transport=`` parameter (same as v0.3 — the transport is internal).
+2. ``cli_runner.__all__`` exports ``mcp_start`` / ``mcp_stop`` for lifecycle
+   management.
+3. ``cli_runner.py`` no longer calls ``subprocess.Popen`` or ``subprocess.run``
+   directly — that's delegated to ``mcp_client.py``.
 """
 
 from __future__ import annotations
@@ -22,67 +22,48 @@ from hermes_icm_memory import cli_runner
 def test_run_recall_has_no_transport_kwarg() -> None:
     sig = inspect.signature(cli_runner.run_recall)
     assert "transport" not in sig.parameters, (
-        f"run_recall must not carry transport kwarg in v0.3; sig={sig}"
+        f"run_recall must not carry transport kwarg; sig={sig}"
     )
 
 
 def test_run_store_has_no_transport_kwarg() -> None:
     sig = inspect.signature(cli_runner.run_store)
     assert "transport" not in sig.parameters, (
-        f"run_store must not carry transport kwarg in v0.3; sig={sig}"
+        f"run_store must not carry transport kwarg; sig={sig}"
     )
 
 
 def test_run_topics_has_no_transport_kwarg() -> None:
     sig = inspect.signature(cli_runner.run_topics)
     assert "transport" not in sig.parameters, (
-        f"run_topics must not carry transport kwarg in v0.3; sig={sig}"
+        f"run_topics must not carry transport kwarg; sig={sig}"
     )
 
 
 def test_run_health_has_no_transport_kwarg() -> None:
     sig = inspect.signature(cli_runner.run_health)
     assert "transport" not in sig.parameters, (
-        f"run_health must not carry transport kwarg in v0.3; sig={sig}"
+        f"run_health must not carry transport kwarg; sig={sig}"
     )
 
 
-def test_cli_runner_all_does_not_include_mcp_helpers() -> None:
+def test_cli_runner_all_exports_mcp_lifecycle() -> None:
+    """v0.4 — cli_runner exports mcp_start/mcp_stop for lifecycle management."""
     exported = set(cli_runner.__all__)
-    assert "mcp_start" not in exported
-    assert "mcp_stop" not in exported
+    assert "mcp_start" in exported, "mcp_start must be exported in v0.4"
+    assert "mcp_stop" in exported, "mcp_stop must be exported in v0.4"
+    assert "run_recall" in exported
+    assert "run_store" in exported
+    assert "run_topics" in exported
+    assert "run_health" in exported
 
 
-def test_cli_runner_module_has_no_mcp_attributes() -> None:
-    """No ``mcp_*`` / ``_mcp_*`` / ``_McpDaemon`` symbols leaked in.
+def test_cli_runner_source_has_no_direct_subprocess_call() -> None:
+    """v0.4 — cli_runner source contains no direct ``subprocess.`` calls.
 
-    Catches a regression where someone re-introduces the daemon path under
-    a slightly different name.
-    """
-    suspicious = [
-        name
-        for name in dir(cli_runner)
-        if (
-            name.startswith("mcp_")
-            or name.startswith("_mcp_")
-            or name.startswith("_McpDaemon")
-            or name.startswith("_MCP_")
-        )
-    ]
-    assert suspicious == [], (
-        f"cli_runner must not carry MCP daemon symbols in v0.3; found: {suspicious}"
-    )
-
-
-def test_cli_runner_source_has_no_subprocess_popen() -> None:
-    """Source text contains no ``subprocess.Popen`` call.
-
-    AC4 invariant — the only subprocess primitive in v0.3 is
-    ``subprocess.run`` (one-shot CLI invocations). ``Popen`` is what the
-    deleted MCP daemon path used to keep an ``icm serve`` long-lived.
+    All subprocess invocations live in ``mcp_client.py``.
     """
     source = Path(cli_runner.__file__).read_text(encoding="utf-8")
-    assert "subprocess.Popen" not in source, (
-        "cli_runner.py must not call subprocess.Popen in v0.3 — only "
-        "subprocess.run for one-shot CLI invocations"
+    assert "subprocess." not in source, (
+        "cli_runner.py must not call subprocess directly in v0.4"
     )

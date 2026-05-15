@@ -35,19 +35,29 @@ _KEYWORDS_LIMIT: Final[int] = 5
 # Compiled patterns. Word boundaries (\b) keep partial matches like "fixedly" out.
 # All searched case-insensitively.
 _ERRORS_RESOLVED_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\b(fixed|resolved|the bug was|root cause|fix(?:ed)? it)\b",
+    r"\b(fixed|resolved|the bug was|root cause|fix(?:ed)? it|"
+    r"the issue was|that explains|the problem was|caused by|"
+    r"turns? out the|was due to|reason it (?:failed|broke|didn'?t))",
     re.IGNORECASE,
 )
 _DECISIONS_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\b(decided to|going with|we'll use|let's use|chose to)\b",
+    r"\b(decided to|going with|we'll use|let's use|chose to|"
+    r"let'?s go with|we should use|we should go|"
+    r"I'm going to use|the approach is)",
     re.IGNORECASE,
 )
 _PREFERENCES_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\b(always (?:use|do)|never (?:use|do)|prefer)\b",
+    r"\b(always (?:use|do)|never (?:use|do)|prefer|"
+    r"I (?:like|love|hate|can'?t stand) when|"
+    r"my (?:favourite|favorite|preferred)|"
+    r"don'?t (?:like|use|do)|won'?t use)",
     re.IGNORECASE,
 )
 _LEARNINGS_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\b(learned|turns out|TIL|now I understand)\b",
+    r"\b(learned|turns out|TIL|now I understand|"
+    r"interestingly|actually it (?:works|seems|turns)|"
+    r"the key insight|what I didn'?t know|"
+    r"it (?:turns|turned) out that)",
     re.IGNORECASE,
 )
 

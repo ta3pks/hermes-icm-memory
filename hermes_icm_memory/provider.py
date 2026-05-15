@@ -29,7 +29,7 @@ import threading
 from pathlib import Path
 from typing import Any, Final
 
-from . import config, hooks
+from . import cli_runner, config, hooks
 
 __all__ = ["IcmMemoryProvider"]
 
@@ -143,6 +143,17 @@ class IcmMemoryProvider:
         self._session_id = session_id
         self._init_args = args_key
 
+        # v0.4 — start the warm MCP daemon for all subsequent CLI calls.
+        try:
+            cli_runner.mcp_start(db_path=self._db_path, use_embeddings=self._config_bool("use_embeddings"))
+        except Exception as exc:
+            logger.warning(
+                "initialize: MCP daemon start failed: %r — provider self-disabling",
+                exc,
+                extra={"err": repr(exc)},
+            )
+            self._available = False
+
     # ------------------------------------------------------------------ config
 
     def get_config_schema(self) -> list[dict[str, Any]]:
@@ -247,6 +258,27 @@ class IcmMemoryProvider:
             write_timeout_ms=self._config_int("command_timeout_write_ms"),
         )
 
+    def _ensure_classifier(self) -> bool:
+        """Lazy-spawn / respawn the classifier; returns False if misconfigured."""
+        # Classifier needs the write queue to exist first.
+        if self._worker_state.write_queue is None:
+            return False
+        endpoint = self._config_str("classifier_endpoint")
+        model = self._config_str("classifier_model")
+        if not endpoint or not model:
+            logger.debug(
+                "classifier: disabled — endpoint or model empty in config",
+                extra={"endpoint": endpoint, "model": model},
+            )
+            return False
+        return hooks.ensure_classifier(
+            self._worker_state,
+            classify_queue_size=self._config_int("classify_queue_size"),
+            endpoint=endpoint,
+            model=model,
+            timeout_s=self._config_int("classifier_timeout_ms") / 1000.0,
+        )
+
     # ------------------------------------------------------------------ prefetch
 
     def prefetch(self, query: str = "", **kwargs: Any) -> str:  # noqa: ARG002
@@ -330,8 +362,16 @@ class IcmMemoryProvider:
         Returns within p95 < 5 ms (NFR-PERF-1). Drop-on-full overflow with
         one WARNING per burst (FR15). Never raises.
         """
+        classifier_enabled = self._config_bool("classifier_enabled")
+
         if not self._ensure_worker():
             return
+
+        if classifier_enabled and not self._ensure_classifier():
+            # If classifier is misconfigured, fall through with classifier_enabled=False
+            # so regex path runs instead.
+            classifier_enabled = False
+
         try:
             hooks.submit_triggers(
                 self._worker_state,
@@ -339,6 +379,7 @@ class IcmMemoryProvider:
                 assistant_content=assistant_content,
                 project=None,
                 every_n_turns=self._config_int("periodic_progress_every_n_turns"),
+                classifier_enabled=classifier_enabled,
             )
         except Exception as exc:  # outer boundary — must not raise into the turn
             logger.warning(
@@ -374,11 +415,17 @@ class IcmMemoryProvider:
     # ------------------------------------------------------------------ shutdown
 
     def shutdown(self) -> None:
-        """Hermes lifecycle hook — no-op in v0.3.
+        """Stop the MCP daemon and clean up resources."""
+        # v0.4 — shut down the MCP daemon gracefully.
+        try:
+            cli_runner.mcp_stop()
+        except Exception as exc:
+            logger.warning(
+                "shutdown: MCP daemon stop error: %r",
+                exc,
+                extra={"err": repr(exc)},
+            )
 
-        Defined explicitly so hermes-agent's ``memory_manager`` no longer
-        logs ``'IcmMemoryProvider' object has no attribute 'shutdown'`` on
-        gateway restart. The v0.2 daemon torn down here is now owned by
-        hermes-native ``mcp_servers.icm:`` (AD-21).
-        """
-        return None
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------

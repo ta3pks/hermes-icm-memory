@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "hermes_icm_memory"
-ALLOWED_FILENAME = "cli_runner.py"
+ALLOWED_FILENAMES = {"cli_runner.py", "mcp_client.py"}
 
 
 def _imports_subprocess(source: str) -> bool:
@@ -37,16 +37,16 @@ def _iter_package_py_files() -> Iterable[Path]:
 
 
 def test_only_cli_runner_imports_subprocess() -> None:
-    """No file under ``hermes_icm_memory/`` other than ``cli_runner.py`` imports subprocess."""
+    """No file under ``hermes_icm_memory/`` other than ``cli_runner.py`` or ``mcp_client.py`` imports subprocess."""
     offenders: list[str] = []
     for path in _iter_package_py_files():
-        if path.name == ALLOWED_FILENAME:
+        if path.name in ALLOWED_FILENAMES:
             continue
         source = path.read_text(encoding="utf-8")
         if _imports_subprocess(source):
             offenders.append(str(path.relative_to(PACKAGE_ROOT.parent)))
     assert offenders == [], (
-        "subprocess imported outside cli_runner.py — AD-12 violated. "
+        "subprocess imported outside cli_runner.py or mcp_client.py — AD-12 violated. "
         f"Offending files: {offenders}"
     )
 
