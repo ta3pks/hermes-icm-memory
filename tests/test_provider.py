@@ -19,7 +19,7 @@ from typing import Any, NoReturn
 
 import pytest
 
-from hermes_icm_memory import config
+from hermes_icm_memory import cli_runner, config
 from hermes_icm_memory.provider import IcmMemoryProvider
 
 # ---------- AC1: name ---------------------------------------------------------
@@ -215,6 +215,7 @@ def test_initialize_default_shared_no_mkdir_on_unwritable(
 
     monkeypatch.setattr(config, "mkdir_parent", _raise_oserror)
     monkeypatch.setattr(shutil, "which", lambda _: "/usr/local/bin/icm")
+    monkeypatch.setattr(cli_runner, "mcp_start", lambda *a, **kw: None)
 
     provider = IcmMemoryProvider()
     provider.initialize(session_id="s1", hermes_home=tmp_hermes_home, profile="default")
