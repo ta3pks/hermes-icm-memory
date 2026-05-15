@@ -37,7 +37,9 @@ def _iter_package_py_files() -> Iterable[Path]:
 
 
 def test_only_cli_runner_imports_subprocess() -> None:
-    """No file under ``hermes_icm_memory/`` other than ``cli_runner.py`` or ``mcp_client.py`` imports subprocess."""
+    """No file under ``hermes_icm_memory/`` other than
+    ``cli_runner.py`` or ``mcp_client.py`` imports subprocess.
+    """
     offenders: list[str] = []
     for path in _iter_package_py_files():
         if path.name in ALLOWED_FILENAMES:

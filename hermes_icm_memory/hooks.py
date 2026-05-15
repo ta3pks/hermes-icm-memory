@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import cli_runner, classifier, mapping
+from . import classifier, cli_runner, mapping
 from .errors import ICMError
 
 # Re-export so consumers can import either from hooks or classifier.
@@ -513,7 +513,10 @@ def submit_triggers(
     if classifier_enabled:
         _submit_classify_task(state, user_content, assistant_content, project)
         # Also fire periodic progress check regardless of content.
-        _submit_periodic_context(state, turn_index=state.turn_index, every_n_turns=every_n_turns, project=project)
+        _submit_periodic_context(
+            state, turn_index=state.turn_index,
+            every_n_turns=every_n_turns, project=project
+        )
         return
 
     # Regex path (existing behaviour).

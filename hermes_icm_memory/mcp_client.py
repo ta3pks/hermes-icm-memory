@@ -15,6 +15,7 @@ Respawn policy:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import subprocess
@@ -127,7 +128,7 @@ class IcmMcpClient:
         """Send shutdown notification and terminate the subprocess gracefully."""
         if self._proc is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             self._send_jsonrpc(
                 {
                     "jsonrpc": _RPC_VERSION,
@@ -136,8 +137,6 @@ class IcmMcpClient:
                 },
                 expect_response=False,
             )
-        except Exception:
-            pass
         self._kill()
 
     def call_recall(
@@ -334,7 +333,7 @@ class IcmMcpClient:
                 return None
 
             raw = self._read_line()
-            response = json.loads(raw)
+            response: dict[str, Any] = json.loads(raw)
 
             if "error" in response:
                 err = response["error"]
@@ -409,10 +408,8 @@ class IcmMcpClient:
                 self._proc.terminate()
                 self._proc.wait(timeout=3)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     self._proc.kill()
-                except Exception:
-                    pass
             self._proc = None
 
 

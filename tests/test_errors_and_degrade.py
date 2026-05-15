@@ -22,9 +22,8 @@ from __future__ import annotations
 
 import logging
 import shutil
-import time
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest

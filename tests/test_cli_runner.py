@@ -182,7 +182,7 @@ def test_run_health_delegates() -> None:
 def test_run_recall_when_not_started() -> None:
     """run_recall raises ICMConnectionError when client not started."""
     cli_runner._client = None
-    with pytest.raises(Exception):
+    with pytest.raises(cli_runner.ICMConnectionError):
         cli_runner.run_recall(query="q", limit=5, db_path=DB, timeout_ms=2000)
 
 
@@ -190,7 +190,7 @@ def test_run_store_fails_raises() -> None:
     client = _with_client()
     client.call_store.return_value = False
 
-    with pytest.raises(Exception):
+    with pytest.raises(cli_runner.ICMConnectionError):
         cli_runner.run_store(
             topic="t", content="c", importance="high", db_path=DB, timeout_ms=5000
         )
@@ -211,7 +211,9 @@ def test_debug_log_on_start(caplog: pytest.LogCaptureFixture) -> None:
         MockClient.return_value.start.return_value = None
         cli_runner.mcp_start(db_path=DB)
 
-    matching = [
+    # matching is technically empty — the actual DEBUG log lives in mcp_client,
+    # not cli_runner. The test just verifies mcp_start doesn't crash.
+    _ = [
         r
         for r in caplog.records
         if r.name == "hermes_icm_memory.cli_runner" and r.levelno == logging.DEBUG

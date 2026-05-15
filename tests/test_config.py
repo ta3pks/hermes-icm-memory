@@ -34,19 +34,26 @@ _EXPECTED_KEYS: set[str] = {
     # v0.1.1 additions:
     "isolated",
     "use_embeddings",
+    # v0.4 additions (classifier):
+    "classifier_enabled",
+    "classifier_provider",
+    "classifier_model",
+    "classifier_timeout_ms",
+    "classifier_endpoint",
+    "classify_queue_size",
 }
 
 
-def test_default_schema_has_twelve_keys() -> None:
-    """Schema covers exactly the twelve config keys with required fields.
+def test_default_schema_has_eighteen_keys() -> None:
+    """Schema covers exactly the eighteen config keys with required fields.
 
     Ten architecture §10.1 keys + two v0.1.1 additions
-    (``isolated``, ``use_embeddings``). v0.2's ``transport`` enum was
-    removed in v0.3 (AC2).
+    (``isolated``, ``use_embeddings``) + six v0.4 classifier keys.
+    v0.2's ``transport`` enum was removed in v0.3 (AC2).
     """
     schema = config.get_default_schema()
     assert isinstance(schema, list)
-    assert len(schema) == 12
+    assert len(schema) == 18
     keys = {entry["key"] for entry in schema}
     assert keys == _EXPECTED_KEYS, f"unexpected schema keys: {keys ^ _EXPECTED_KEYS}"
     # ``transport`` (the v0.2 key) MUST be absent in v0.3 — pin the negative

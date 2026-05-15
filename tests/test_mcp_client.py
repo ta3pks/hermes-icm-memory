@@ -14,7 +14,6 @@ from hermes_icm_memory.mcp_client import (
     _parse_topics_response,
 )
 
-
 # ---------------------------------------------------------------------------
 # _get_text — extract text from MCP content list
 # ---------------------------------------------------------------------------

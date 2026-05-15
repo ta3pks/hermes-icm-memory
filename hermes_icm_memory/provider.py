@@ -151,7 +151,10 @@ class IcmMemoryProvider:
 
         # v0.4 — start the warm MCP daemon for all subsequent CLI calls.
         try:
-            cli_runner.mcp_start(db_path=self._db_path, use_embeddings=self._config_bool("use_embeddings"))
+            cli_runner.mcp_start(
+                db_path=self._db_path,
+                use_embeddings=self._config_bool("use_embeddings"),
+            )
         except Exception as exc:
             logger.warning(
                 "initialize: MCP daemon start failed: %r — provider self-disabling",
@@ -343,9 +346,7 @@ class IcmMemoryProvider:
 
         # Step 4: construct the chat completions endpoint URL
         endpoint = base_url.rstrip("/")
-        if not endpoint.endswith("/chat/completions") and not endpoint.endswith("/v1"):
-            endpoint = endpoint + "/chat/completions"
-        elif endpoint.endswith("/v1") and not endpoint.endswith("/chat/completions"):
+        if not endpoint.endswith("/chat/completions"):
             endpoint = endpoint + "/chat/completions"
 
         # Step 5: find the API key

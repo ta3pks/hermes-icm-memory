@@ -14,7 +14,6 @@ import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any
 
 __all__ = [
     "ClassifyTask",
@@ -39,7 +38,8 @@ Respond with a JSON object. If nothing worth storing:
 {{"store": null, "reason": "<brief reason>"}}
 
 If something worth storing:
-{{"store": {{"topic": "<topic>", "importance": "<importance>", "content": "<short summary>", "keywords": ["kw1", "kw2"]}}}}
+{{"store": {{"topic": "<topic>", "importance": "<importance>",
+       "content": "<short summary>", "keywords": ["kw1", "kw2"]}}}}
 
 Topic must be one of: preferences, decisions, errors-resolved, learnings, context
 Importance must be one of: critical, high, medium, low
