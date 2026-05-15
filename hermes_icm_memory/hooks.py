@@ -107,6 +107,9 @@ class WorkerState:
     class_respawn_count: int = 0
     class_disabled: bool = False
 
+    # v0.5 — recent stores buffer for user-facing notifications.
+    recent_stores: list[tuple[str, str]] = field(default_factory=list)
+
 
 # ---------- Worker loop ------------------------------------------------------
 
@@ -162,6 +165,7 @@ def worker_loop(
 
 def classifier_loop(
     *,
+    state: WorkerState,
     classify_queue: queue.Queue[classifier.ClassifyTask],
     write_queue: queue.Queue[WriteTask],
     endpoint: str,
@@ -212,6 +216,8 @@ def classifier_loop(
         )
         try:
             write_queue.put_nowait(write_task)
+            # Track for user-facing notification (thread-safe append on CPython).
+            state.recent_stores.append((result.topic, result.content[:120]))
         except queue.Full:
             logger.debug(
                 "classifier: write queue full; dropping classified memory",
@@ -354,6 +360,7 @@ def _spawn_classifier(
     thread = threading.Thread(
         target=classifier_loop,
         kwargs={
+            "state": state,
             "classify_queue": state.classify_queue,
             "write_queue": state.write_queue,
             "endpoint": endpoint,
@@ -447,21 +454,30 @@ def format_block(
         return ""
 
     capped = hits[: max(1, recall_limit)]
-    lines: list[str] = ["Recalled memories:"]
+    lines: list[str] = ["📖 Recalled memories:"]
     topics: list[str] = []
     seen_topics: set[str] = set()
     for hit in capped:
         topic = str(hit.get("topic") or "")
         summary = str(hit.get("summary") or hit.get("content") or "")
-        lines.append(f"- [{topic}] {summary}".rstrip())
+        lines.append(f"  - [{topic}] {summary}".rstrip())
         if topic and topic not in seen_topics:
             seen_topics.add(topic)
             topics.append(topic)
 
     summary_line = (
-        f"\nProject context: {', '.join(topics)}." if topics else ""
+        f"\n  Project context: {', '.join(topics)}." if topics else ""
     )
-    return "\n".join(lines) + summary_line
+    block = "\n".join(lines) + summary_line
+
+    # Append a user-visibility instruction for the LLM.
+    hint = (
+        "\n\n"
+        "When you reference recalled memories in your response, "
+        "you may mention them naturally — keep it brief. "
+        "If there's nothing to reference, stay silent about it."
+    )
+    return block + hint
 
 
 # ---------- sync_turn body --------------------------------------------------

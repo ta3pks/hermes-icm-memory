@@ -102,7 +102,10 @@ def classify_exchange(
         }
     ).encode("utf-8")
 
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "HermesICM/0.4",
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 

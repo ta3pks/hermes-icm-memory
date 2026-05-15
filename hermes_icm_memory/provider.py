@@ -350,12 +350,27 @@ class IcmMemoryProvider:
 
         # Step 5: find the API key
         api_key = ""
-        # Check env var by provider name convention
-        env_var = f"{provider.upper().replace('-', '_')}_API_KEY"
-        api_key = os.environ.get(env_var, "")
-        # Try the main provider's env var if different
-        if not api_key:
-            api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        # Try multiple env var patterns — provider names in config don't always
+        # match the env var convention (e.g. "opencode" → OPENCODE_ZEN_API_KEY)
+        provider_upper = provider.upper().replace("-", "_")
+        candidates = [
+            f"{provider_upper}_API_KEY",
+            f"{provider_upper}_ZEN_API_KEY",
+            f"{provider_upper}_GO_API_KEY",
+            "OPENROUTER_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+        ]
+        for candidate in candidates:
+            val = os.environ.get(candidate, "")
+            if val:
+                api_key = val
+                logger.debug(
+                    "classifier: found API key via %s", candidate,
+                    extra={"provider": provider, "env_var": candidate},
+                )
+                break
 
         return {
             "endpoint": endpoint,
@@ -448,21 +463,35 @@ class IcmMemoryProvider:
         Reads the cache only — never invokes ``cli_runner`` (NFR-PERF-4).
         Disabled prefetch / empty cache → ``""``.
         """
-        if not self._config_bool("prefetch_enabled"):
-            return ""
-        try:
-            return hooks.format_block(
-                cache=self._prefetch_cache,
-                latest_key=self._latest_prefetch_key,
-                recall_limit=self._config_int("recall_limit"),
-            )
-        except Exception as exc:  # defensive boundary
-            logger.warning(
-                "system_prompt_block: outer boundary caught: %r",
-                exc,
-                extra={"err": repr(exc)},
-            )
-            return ""
+        blocks: list[str] = []
+
+        # Part 1: recently stored memories (from async classifier).
+        ws = self._worker_state
+        if ws and ws.recent_stores:
+            store_lines = ["🧠 New memories stored:"]
+            for topic, content in ws.recent_stores:
+                store_lines.append(f"  - [{topic}] {content}")
+            blocks.append("\n".join(store_lines))
+            ws.recent_stores.clear()
+
+        # Part 2: recalled memories from prefetch cache.
+        if self._config_bool("prefetch_enabled"):
+            try:
+                recalled = hooks.format_block(
+                    cache=self._prefetch_cache,
+                    latest_key=self._latest_prefetch_key,
+                    recall_limit=self._config_int("recall_limit"),
+                )
+                if recalled:
+                    blocks.append(recalled)
+            except Exception as exc:  # defensive boundary
+                logger.warning(
+                    "system_prompt_block: outer boundary caught: %r",
+                    exc,
+                    extra={"err": repr(exc)},
+                )
+
+        return "\n\n".join(blocks) if blocks else ""
 
     # ------------------------------------------------------------------ sync_turn
 
