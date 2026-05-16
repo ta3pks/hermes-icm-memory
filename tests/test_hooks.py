@@ -661,7 +661,11 @@ def test_worker_loop_defensive_swallows_unexpected_exception(
 
     state.stop_event.set()
     thread.join(timeout=1.0)
-    assert seen == ["ok"]
+    assert "ok" in seen, f"worker should have processed at least one task after the error; seen={seen!r}"
+    # Verify the unexpected error was logged.
+    assert any("unexpected error" in r.message for r in caplog.records), (
+        f"expected WARNING about unexpected error; got {[r.message for r in caplog.records]!r}"
+    )
 
 
 def test_provider_prefetch_disabled_returns_empty(
@@ -750,3 +754,769 @@ def test_provider_prefetch_use_embeddings_opt_out_threads_through(
     initialized_provider._config["use_embeddings"] = False
     initialized_provider.prefetch(query="x")
     assert captured["use_embeddings"] is False
+
+
+# ---------- classifier_loop (lines 182-233) ----------------------------------
+
+
+def test_classifier_loop_processes_task_and_enqueues_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """classify returns a result -> WriteTask enqueued; recent_stores appended."""
+    from hermes_icm_memory import classifier as cls_mod
+
+    result = cls_mod.ClassifierResult(
+        topic="preferences",
+        importance="high",
+        content="user prefers bun",
+        keywords=("bun",),
+    )
+    monkeypatch.setattr(cls_mod, "classify_exchange", lambda *a, **kw: result)
+
+    state = hooks.WorkerState()
+    state.classify_queue = queue.Queue(maxsize=4)
+    state.write_queue = queue.Queue(maxsize=4)
+
+    thread = threading.Thread(
+        target=hooks.classifier_loop,
+        kwargs={
+            "state": state,
+            "classify_queue": state.classify_queue,
+            "write_queue": state.write_queue,
+            "endpoint": "http://test",
+            "model": "m",
+            "api_key": "",
+            "timeout_s": 5.0,
+            "stop_event": state.stop_event,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    state.classify_queue.put_nowait(
+        cls_mod.ClassifyTask(user_text="u", assistant_text="a", project=None)
+    )
+    state.classify_queue.join()  # block until task_done
+
+    state.stop_event.set()
+    thread.join(timeout=1.0)
+
+    task = state.write_queue.get_nowait()
+    assert task.topic == "preferences"
+    assert task.importance == "high"
+    assert task.content == "user prefers bun"
+    assert task.keywords == ("bun",)
+    # recent_stores was appended (thread-safe list append).
+    assert state.recent_stores == [("preferences", "user prefers bun")]
+
+
+def test_classifier_loop_none_result_skips_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """classify_exchange returns None -> no write task enqueued."""
+    from hermes_icm_memory import classifier as cls_mod
+
+    monkeypatch.setattr(cls_mod, "classify_exchange", lambda *a, **kw: None)
+
+    state = hooks.WorkerState()
+    state.classify_queue = queue.Queue(maxsize=4)
+    state.write_queue = queue.Queue(maxsize=4)
+
+    thread = threading.Thread(
+        target=hooks.classifier_loop,
+        kwargs={
+            "state": state,
+            "classify_queue": state.classify_queue,
+            "write_queue": state.write_queue,
+            "endpoint": "http://test",
+            "model": "m",
+            "api_key": "",
+            "timeout_s": 5.0,
+            "stop_event": state.stop_event,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    state.classify_queue.put_nowait(
+        cls_mod.ClassifyTask(user_text="u", assistant_text="a", project=None)
+    )
+    state.classify_queue.join()
+
+    state.stop_event.set()
+    thread.join(timeout=1.0)
+
+    assert state.write_queue.empty()
+
+
+def test_classifier_loop_exception_in_classify_logged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """classify_exchange raises -> DEBUG log, task_done called, worker continues."""
+    from hermes_icm_memory import classifier as cls_mod
+
+    call_count = 0
+
+    def boom_then_none(*a: Any, **kw: Any) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("llm error")
+        return None
+
+    monkeypatch.setattr(cls_mod, "classify_exchange", boom_then_none)
+
+    state = hooks.WorkerState()
+    state.classify_queue = queue.Queue(maxsize=4)
+    state.write_queue = queue.Queue(maxsize=4)
+
+    thread = threading.Thread(
+        target=hooks.classifier_loop,
+        kwargs={
+            "state": state,
+            "classify_queue": state.classify_queue,
+            "write_queue": state.write_queue,
+            "endpoint": "http://test",
+            "model": "m",
+            "api_key": "",
+            "timeout_s": 5.0,
+            "stop_event": state.stop_event,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.hooks"):
+        # First task raises.
+        state.classify_queue.put_nowait(
+            cls_mod.ClassifyTask(user_text="u", assistant_text="a", project=None)
+        )
+        state.classify_queue.join()  # task_done called even after exception
+
+        # Second task — should process normally (None result).
+        state.classify_queue.put_nowait(
+            cls_mod.ClassifyTask(user_text="u2", assistant_text="a2", project=None)
+        )
+        state.classify_queue.join()
+
+    assert any(
+        "unexpected error" in r.message for r in caplog.records
+    ), f"expected DEBUG about unexpected error; got {[r.message for r in caplog.records]!r}"
+
+    state.stop_event.set()
+    thread.join(timeout=1.0)
+
+
+def test_classifier_loop_write_queue_full_drops(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Write queue full -> DEBUG log, task_done still called."""
+    from hermes_icm_memory import classifier as cls_mod
+
+    result = cls_mod.ClassifierResult(
+        topic="preferences",
+        importance="high",
+        content="test",
+        keywords=(),
+    )
+    monkeypatch.setattr(cls_mod, "classify_exchange", lambda *a, **kw: result)
+
+    state = hooks.WorkerState()
+    state.classify_queue = queue.Queue(maxsize=4)
+    state.write_queue = queue.Queue(maxsize=1)
+    state.write_queue.put_nowait(
+        WriteTask(topic="fill", importance="high", content="fill", keywords=())
+    )
+
+    thread = threading.Thread(
+        target=hooks.classifier_loop,
+        kwargs={
+            "state": state,
+            "classify_queue": state.classify_queue,
+            "write_queue": state.write_queue,
+            "endpoint": "http://test",
+            "model": "m",
+            "api_key": "",
+            "timeout_s": 5.0,
+            "stop_event": state.stop_event,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.hooks"):
+        state.classify_queue.put_nowait(
+            cls_mod.ClassifyTask(user_text="u", assistant_text="a", project=None)
+        )
+        state.classify_queue.join()
+
+    assert any(
+        "write queue full" in r.message for r in caplog.records
+    ), f"expected DEBUG about full write queue; got {[r.message for r in caplog.records]!r}"
+
+    state.stop_event.set()
+    thread.join(timeout=1.0)
+
+
+class _BoomWriteQueue(queue.Queue):
+    """A queue whose put_nowait always raises RuntimeError."""
+
+    def put_nowait(self, item: Any) -> None:
+        raise RuntimeError("unexpected write error")
+
+
+def test_classifier_loop_write_enqueue_unexpected_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """put_nowait on write_queue raises unexpected Exception -> logged at DEBUG."""
+    from hermes_icm_memory import classifier as cls_mod
+
+    result = cls_mod.ClassifierResult(
+        topic="learnings",
+        importance="medium",
+        content="something learned",
+        keywords=("learn",),
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(cls_mod, "classify_exchange", lambda *a, **kw: result)
+
+    state = hooks.WorkerState()
+    state.classify_queue = queue.Queue(maxsize=4)
+    # Use a subclass that always raises on put_nowait — avoids patching the
+    # shared ``queue.Queue`` class (which would also break the classify queue).
+    state.write_queue = _BoomWriteQueue(maxsize=4)
+
+    thread = threading.Thread(
+        target=hooks.classifier_loop,
+        kwargs={
+            "state": state,
+            "classify_queue": state.classify_queue,
+            "write_queue": state.write_queue,
+            "endpoint": "http://test",
+            "model": "m",
+            "api_key": "",
+            "timeout_s": 5.0,
+            "stop_event": state.stop_event,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.hooks"):
+        state.classify_queue.put_nowait(
+            cls_mod.ClassifyTask(user_text="u", assistant_text="a", project=None)
+        )
+        state.classify_queue.join()
+
+    monkeypatch.undo()
+
+    assert any(
+        "enqueue failed" in r.message for r in caplog.records
+    ), f"expected DEBUG about enqueue failure; got {[r.message for r in caplog.records]!r}"
+
+    state.stop_event.set()
+    thread.join(timeout=1.0)
+
+
+# ---------- ensure_classifier (lines 321-347) + _spawn_classifier (358-376) ----
+
+
+def test_ensure_classifier_disabled_short_circuit() -> None:
+    """class_disabled=True -> returns False immediately, no side effects."""
+    state = hooks.WorkerState()
+    state.class_disabled = True
+    result = hooks.ensure_classifier(
+        state,
+        classify_queue_size=4,
+        endpoint="http://test",
+        model="m",
+        api_key="",
+        timeout_s=5.0,
+    )
+    assert result is False
+    assert state.classify_queue is None  # queue never created
+    assert state.class_worker is None
+
+
+def test_ensure_classifier_first_spawn_creates_queue_and_starts_worker() -> None:
+    """First call creates classify_queue and spawns the classifier worker."""
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=4)
+
+    result = hooks.ensure_classifier(
+        state,
+        classify_queue_size=8,
+        endpoint="http://test",
+        model="m",
+        api_key="secret",
+        timeout_s=5.0,
+    )
+    assert result is True
+    assert state.classify_queue is not None
+    assert state.classify_queue.maxsize == 8
+    assert state.class_worker is not None
+    assert state.class_worker.is_alive()
+    assert state.class_worker.name == "hermes-icm-classifier"
+    assert state.class_respawn_count == 0
+    assert state.class_disabled is False
+
+    # Cleanup.
+    state.stop_event.set()
+    state.class_worker.join(timeout=1.0)
+
+
+def test_ensure_classifier_idempotent_when_alive() -> None:
+    """Second call when worker is alive -> returns True, no new worker."""
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=4)
+
+    hooks.ensure_classifier(
+        state,
+        classify_queue_size=4,
+        endpoint="http://test",
+        model="m",
+        api_key="",
+        timeout_s=5.0,
+    )
+    first_worker = state.class_worker
+    assert first_worker is not None
+
+    result = hooks.ensure_classifier(
+        state,
+        classify_queue_size=4,
+        endpoint="http://test",
+        model="m",
+        api_key="",
+        timeout_s=5.0,
+    )
+    assert result is True
+    assert state.class_worker is first_worker  # same thread
+    assert state.class_respawn_count == 0
+
+    state.stop_event.set()
+    state.class_worker.join(timeout=1.0)
+
+
+def test_ensure_classifier_respawns_after_first_death(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """First classifier death -> respawn, WARNING logged, respawn_count incremented."""
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=4)
+
+    hooks.ensure_classifier(
+        state,
+        classify_queue_size=4,
+        endpoint="http://test",
+        model="m",
+        api_key="",
+        timeout_s=5.0,
+    )
+    first_worker = state.class_worker
+    assert first_worker is not None and first_worker.is_alive()
+
+    # Kill via stop_event.
+    state.stop_event.set()
+    first_worker.join(timeout=1.0)
+    assert not first_worker.is_alive()
+    state.stop_event.clear()
+
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
+        result = hooks.ensure_classifier(
+            state,
+            classify_queue_size=4,
+            endpoint="http://test",
+            model="m",
+            api_key="",
+            timeout_s=5.0,
+        )
+
+    assert result is True
+    assert state.class_respawn_count == 1
+    assert state.class_worker is not first_worker
+    assert state.class_worker is not None and state.class_worker.is_alive()
+    assert state.class_disabled is False
+    assert any(
+        "respawned" in r.message for r in caplog.records
+    ), f"expected WARNING about respawn; got {[r.message for r in caplog.records]!r}"
+
+    state.stop_event.set()
+    state.class_worker.join(timeout=1.0)
+
+
+def test_ensure_classifier_second_death_disables(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Second death -> class_disabled=True, CRITICAL log, returns False."""
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=4)
+
+    # Spawn.
+    hooks.ensure_classifier(
+        state,
+        classify_queue_size=4,
+        endpoint="http://test",
+        model="m",
+        api_key="",
+        timeout_s=5.0,
+    )
+    worker1 = state.class_worker
+    assert worker1 is not None
+
+    # First death + respawn.
+    state.stop_event.set()
+    worker1.join(timeout=1.0)
+    state.stop_event.clear()
+
+    hooks.ensure_classifier(
+        state,
+        classify_queue_size=4,
+        endpoint="http://test",
+        model="m",
+        api_key="",
+        timeout_s=5.0,
+    )
+    worker2 = state.class_worker
+    assert state.class_respawn_count == 1
+
+    # Second death.
+    state.stop_event.set()
+    worker2.join(timeout=1.0)
+    state.stop_event.clear()
+
+    with caplog.at_level(logging.CRITICAL, logger="hermes_icm_memory.hooks"):
+        result = hooks.ensure_classifier(
+            state,
+            classify_queue_size=4,
+            endpoint="http://test",
+            model="m",
+            api_key="",
+            timeout_s=5.0,
+        )
+
+    assert result is False
+    assert state.class_disabled is True
+    assert any(
+        record.levelno == logging.CRITICAL for record in caplog.records
+    ), f"expected CRITICAL log; got levels {[r.levelno for r in caplog.records]!r}"
+
+    state.stop_event.set()
+    if state.class_worker is not None and state.class_worker.is_alive():
+        state.class_worker.join(timeout=1.0)
+
+
+# ---------- _submit_classify_task (lines 567-583) -----------------------------
+
+
+def test_submit_classify_task_enqueues() -> None:
+    """A classify task is enqueued on the classify queue."""
+    from hermes_icm_memory import classifier as cls_mod
+
+    state = hooks.WorkerState()
+    state.classify_queue = queue.Queue(maxsize=4)
+    hooks._submit_classify_task(state, "user text", "assistant text", "my-project")
+
+    task = state.classify_queue.get_nowait()
+    assert task.user_text == "user text"
+    assert task.assistant_text == "assistant text"
+    assert task.project == "my-project"
+
+
+def test_submit_classify_task_no_op_when_queue_none() -> None:
+    """classify_queue is None -> no-op."""
+    state = hooks.WorkerState()
+    # classify_queue is None by default
+    hooks._submit_classify_task(state, "u", "a", None)
+    # No crash.
+
+
+def test_submit_classify_task_no_op_when_class_disabled() -> None:
+    """class_disabled=True -> no-op, nothing enqueued."""
+    state = hooks.WorkerState()
+    state.classify_queue = queue.Queue(maxsize=4)
+    state.class_disabled = True
+    hooks._submit_classify_task(state, "u", "a", None)
+    assert state.classify_queue.empty()
+
+
+def test_submit_classify_task_queue_full_drops(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Classify queue full -> DEBUG log, no raise."""
+    from hermes_icm_memory import classifier as cls_mod
+
+    state = hooks.WorkerState()
+    state.classify_queue = queue.Queue(maxsize=1)
+    state.classify_queue.put_nowait(
+        cls_mod.ClassifyTask(user_text="fill", assistant_text="fill", project=None)
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.hooks"):
+        hooks._submit_classify_task(state, "u", "a", None)
+
+    assert any(
+        "classify queue full" in r.message for r in caplog.records
+    ), f"expected DEBUG about full queue; got {[r.message for r in caplog.records]!r}"
+
+
+def test_submit_classify_task_enqueue_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """put_nowait raises unexpected Exception -> logged at DEBUG."""
+    state = hooks.WorkerState()
+    state.classify_queue = queue.Queue(maxsize=4)
+
+    def boom(*a: Any, **kw: Any) -> None:
+        raise RuntimeError("unexpected enqueue error")
+
+    monkeypatch.setattr(type(state.classify_queue), "put_nowait", boom)
+
+    with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.hooks"):
+        hooks._submit_classify_task(state, "u", "a", None)
+
+    assert any(
+        "classify enqueue error" in r.message for r in caplog.records
+    ), f"expected DEBUG; got {[r.message for r in caplog.records]!r}"
+
+
+# ---------- _submit_periodic_context (lines 594-611) --------------------------
+
+
+def test_submit_periodic_context_fires_on_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Periodic context fires when turn_index % every_n_turns == 0."""
+    monkeypatch.setattr(
+        "hermes_icm_memory.hooks.mapping.MAPPING",
+        {
+            "context": {"topic_template": "context-{project}", "importance": "high"},
+        },
+    )
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=4)
+
+    hooks._submit_periodic_context(
+        state, turn_index=20, every_n_turns=20, project="test-proj"
+    )
+
+    task = state.write_queue.get_nowait()
+    assert task.topic == "context-test-proj"
+    assert task.importance == "high"
+    assert "periodic progress checkpoint: turn 20" in task.content
+    assert task.keywords == ()
+
+
+def test_submit_periodic_context_no_op_when_write_queue_none() -> None:
+    """write_queue is None -> no-op."""
+    state = hooks.WorkerState()
+    hooks._submit_periodic_context(
+        state, turn_index=20, every_n_turns=20, project=None
+    )
+    # No crash.
+
+
+def test_submit_periodic_context_no_op_when_not_boundary() -> None:
+    """turn_index not on boundary -> no-op, nothing enqueued."""
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=4)
+    hooks._submit_periodic_context(
+        state, turn_index=5, every_n_turns=20, project=None
+    )
+    assert state.write_queue.empty()
+
+
+def test_submit_periodic_context_no_op_when_every_n_zero() -> None:
+    """every_n_turns <= 0 -> no-op."""
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=4)
+    hooks._submit_periodic_context(
+        state, turn_index=20, every_n_turns=0, project=None
+    )
+    assert state.write_queue.empty()
+
+
+def test_submit_periodic_context_queue_full(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """put_nowait raises queue.Full -> overflow warning."""
+    monkeypatch.setattr(
+        "hermes_icm_memory.hooks.mapping.MAPPING",
+        {
+            "context": {"topic_template": "context-{project}", "importance": "high"},
+        },
+    )
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=1)
+    state.write_queue.put_nowait(
+        WriteTask(topic="fill", importance="high", content="fill", keywords=())
+    )
+
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
+        hooks._submit_periodic_context(
+            state, turn_index=20, every_n_turns=20, project="p"
+        )
+
+    assert any(
+        "overflow" in r.message for r in caplog.records
+    ), f"expected WARNING about overflow; got {[r.message for r in caplog.records]!r}"
+
+
+def test_submit_periodic_context_enqueue_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """put_nowait raises unexpected Exception -> logged at WARNING."""
+    monkeypatch.setattr(
+        "hermes_icm_memory.hooks.mapping.MAPPING",
+        {
+            "context": {"topic_template": "context-{project}", "importance": "high"},
+        },
+    )
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=4)
+
+    def boom(*a: Any, **kw: Any) -> None:
+        raise RuntimeError("unexpected periodic error")
+
+    monkeypatch.setattr(type(state.write_queue), "put_nowait", boom)
+
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
+        hooks._submit_periodic_context(
+            state, turn_index=20, every_n_turns=20, project="p"
+        )
+
+    assert any(
+        "periodic enqueue error" in r.message for r in caplog.records
+    ), f"expected WARNING; got {[r.message for r in caplog.records]!r}"
+
+
+# ---------- submit_triggers classifier path (lines 513-524, 552-553) ----------
+
+
+def test_submit_triggers_classifier_path_routes_correctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """classifier_enabled=True routes to _submit_classify_task + _submit_periodic_context."""
+    calls: list[str] = []
+
+    def fake_submit_classify(
+        state: hooks.WorkerState,
+        user_content: str,
+        assistant_content: str,
+        project: str | None,
+    ) -> None:
+        calls.append(f"classify:{user_content}:{assistant_content}:{project}")
+
+    def fake_submit_periodic(
+        state: hooks.WorkerState,
+        *,
+        turn_index: int,
+        every_n_turns: int,
+        project: str | None,
+    ) -> None:
+        calls.append(f"periodic:{turn_index}:{every_n_turns}:{project}")
+
+    monkeypatch.setattr(hooks, "_submit_classify_task", fake_submit_classify)
+    monkeypatch.setattr(hooks, "_submit_periodic_context", fake_submit_periodic)
+
+    state = hooks.WorkerState()
+    hooks.submit_triggers(
+        state,
+        user_content="hello",
+        assistant_content="world",
+        project="proj",
+        every_n_turns=10,
+        classifier_enabled=True,
+    )
+
+    assert calls == ["classify:hello:world:proj", "periodic:1:10:proj"], (
+        f"unexpected call sequence: {calls!r}"
+    )
+    assert state.turn_index == 1  # incremented from 0
+
+
+def test_submit_triggers_classifier_path_increments_turn_index() -> None:
+    """classifier_enabled=True still increments turn_index."""
+    state = hooks.WorkerState()
+    state.turn_index = 42
+    hooks.submit_triggers(
+        state,
+        user_content="u",
+        assistant_content="a",
+        project=None,
+        every_n_turns=20,
+        classifier_enabled=True,
+    )
+    assert state.turn_index == 43
+
+
+def test_submit_triggers_regex_path_write_queue_none() -> None:
+    """Regex path: write_queue is None -> no-op (no crash, no raise)."""
+    state = hooks.WorkerState()
+    hooks.submit_triggers(
+        state,
+        user_content="u",
+        assistant_content="a",
+        project=None,
+        every_n_turns=20,
+        classifier_enabled=False,
+    )
+    # No crash — just returns when write_queue is None.
+
+
+def test_submit_triggers_enqueue_raises_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regex path: put_nowait raises Exception -> WARNING logged."""
+    monkeypatch.setattr(
+        "hermes_icm_memory.hooks.mapping.detect_triggers",
+        lambda *a, **kw: [("preferences", "critical", "x", ["x"])],
+    )
+
+    state = hooks.WorkerState()
+    state.write_queue = queue.Queue(maxsize=4)
+
+    def boom_put(*a: Any, **kw: Any) -> None:
+        raise RuntimeError("enqueue failed")
+
+    monkeypatch.setattr(type(state.write_queue), "put_nowait", boom_put)
+
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
+        hooks.submit_triggers(
+            state,
+            user_content="u",
+            assistant_content="a",
+            project=None,
+            every_n_turns=20,
+            classifier_enabled=False,
+        )
+
+    assert any(
+        "enqueue raised" in r.message for r in caplog.records
+    ), f"expected WARNING about enqueue error; got {[r.message for r in caplog.records]!r}"
+
+
+# ---------- drain_with_grace warning branch (line 655) ------------------------
+
+
+def test_drain_with_grace_warning_when_items_remain(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Items still in queue after grace period -> WARNING logged."""
+    state = hooks.WorkerState()
+    q: queue.Queue[hooks.WriteTask] = queue.Queue(maxsize=4)
+    q.put_nowait(WriteTask(topic="A", importance="high", content="slow", keywords=()))
+    q.put_nowait(WriteTask(topic="B", importance="high", content="slow", keywords=()))
+    state.write_queue = q
+
+    with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
+        hooks.drain_with_grace(state, grace_ms=10)
+
+    assert any(
+        "grace expired" in r.message for r in caplog.records
+    ), f"expected WARNING about grace expiry; got {[r.message for r in caplog.records]!r}"
