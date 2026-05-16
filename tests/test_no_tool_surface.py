@@ -26,11 +26,21 @@ def test_provider_has_no_handle_tool_call() -> None:
     )
 
 
-def test_provider_has_no_get_tool_schemas() -> None:
-    """``get_tool_schemas`` is removed (AD-19)."""
-    assert not hasattr(IcmMemoryProvider, "get_tool_schemas"), (
-        "IcmMemoryProvider must not expose get_tool_schemas in v0.3 — "
-        "tool schemas are auto-discovered by hermes from ``icm serve``"
+def test_provider_has_get_tool_schemas() -> None:
+    """``get_tool_schemas`` is present and returns empty list (v0.4).
+
+    Hermes ``MemoryManager.register_provider()`` calls
+    ``get_tool_schemas()`` on every provider during registration
+    — without it the provider cannot be activated.
+    """
+    assert hasattr(IcmMemoryProvider, "get_tool_schemas"), (
+        "IcmMemoryProvider must expose get_tool_schemas in v0.4 — "
+        "Hermes MemoryManager requires it for provider registration."
+    )
+    instance = IcmMemoryProvider()
+    assert instance.get_tool_schemas() == [], (
+        "ICM provider exposes no agent-callable tools directly — "
+        "memory ops happen via prefetch/sync_turn internally."
     )
 
 

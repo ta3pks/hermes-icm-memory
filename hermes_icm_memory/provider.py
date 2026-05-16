@@ -75,6 +75,16 @@ class IcmMemoryProvider:
         self._latest_prefetch_key: int | None = None
         self._worker_state: hooks.WorkerState = hooks.WorkerState()
 
+    # ------------------------------------------------------------------ tool schemas
+
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
+        """Return tool schemas this provider exposes.
+
+        The ICM provider doesn't expose any agent-callable tools
+        — all memory operations are handled internally via prefetch/sync_turn.
+        """
+        return []
+
     # ------------------------------------------------------------------ availability
 
     def is_available(self) -> bool:
