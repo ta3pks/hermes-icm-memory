@@ -267,9 +267,15 @@ class IcmMemoryProvider:
         return self._worker_state.writes_disabled
 
     def _ensure_worker(self) -> bool:
-        """Lazy-spawn / respawn the worker; returns False if writes are disabled."""
-        if self._db_path is None:
-            return False
+        """Lazy-spawn / respawn the worker; returns False if writes are disabled.
+
+        v0.4 — ``_db_path`` may be ``None`` (default-shared mode); the warm
+        MCP daemon started in :meth:`initialize` owns the DB at write time,
+        so the worker spawns regardless. The legacy v0.1.1 guard against
+        ``_db_path is None`` was removed because it silently no-op'd
+        ``sync_turn`` for every user running the recommended ``isolated:
+        false`` config (README "Known limitations" §0.3).
+        """
         return hooks.ensure_worker(
             self._worker_state,
             queue_size=self._config_int("sync_write_queue_size"),

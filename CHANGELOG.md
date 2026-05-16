@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] — 2026-05-16
+
+**Bug fix — auto-store no longer silently dropped in default-shared mode.**
+
+### Fixed
+
+- **`provider._ensure_worker` no longer short-circuits when `_db_path is
+  None`.** The v0.1.1 guard against a missing `_db_path` predated the v0.4
+  MCP migration; once `initialize()` started spawning a warm `icm serve`
+  daemon (which owns its own DB at startup) the guard turned into dead
+  code that silently no-op'd every `sync_turn` for users on the
+  recommended `isolated: false` config. The worker now spawns regardless
+  of `_db_path`, and `cli_runner.run_store` routes writes through the
+  daemon. Regression guard: `tests/test_hooks.py::
+  test_sync_turn_enqueues_in_default_shared_mode`.
+
+### Removed
+
+- **README "Known limitations" caveat** about writes needing a concrete
+  `_db_path` — invalidated by this fix.
+
 ## [0.3.1] — 2026-05-07
 
 **License change — Apache-2.0 → BSD 3-Clause "New" or "Revised" License.**

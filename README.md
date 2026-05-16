@@ -182,7 +182,6 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
 ## Known limitations
 
-- **Writes need a concrete `_db_path` until v0.4.** Under the recommended `isolated: false` (shared DB), `_db_path` is `None` and the write worker no-ops. Auto-store via `sync_turn` is silently dropped. If you need plugin-side writes today, set `isolated: true` to restore the v0.1.0 per-profile silo. The LLM can still write via `icm_memory_store` (hermes-native MCP) — that path works in shared mode. Concurrent-writer semantics with editors against the canonical SQLite file is the v0.4 design problem.
 - **Windows is unsupported.** `icm serve` spawning + signal handling tested on Linux + macOS only.
 
 ## Development

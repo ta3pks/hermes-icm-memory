@@ -1521,3 +1521,69 @@ def test_drain_with_grace_warning_when_items_remain(
     assert any(
         "grace expired" in r.message for r in caplog.records
     ), f"expected WARNING about grace expiry; got {[r.message for r in caplog.records]!r}"
+
+
+# ---------- v0.4.1: sync_turn must enqueue in default-shared mode -------------
+# Regression guard: pre-v0.4.1, ``provider._ensure_worker`` returned False
+# whenever ``_db_path is None`` (the default ``isolated: false`` shared-DB
+# mode), causing every ``sync_turn`` to silently no-op. The MCP daemon spawned
+# by ``initialize`` owns the DB at write time, so the worker can spawn fine
+# with ``db_path=None`` — but the legacy v0.1.1 guard didn't know that.
+
+
+def test_sync_turn_enqueues_in_default_shared_mode(
+    tmp_hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.4.1 regression — sync_turn enqueues even when ``_db_path is None``.
+
+    Reproduces the silent-drop bug: provider in default-shared mode
+    (``isolated: false`` → ``_db_path is None``) used to no-op every
+    ``sync_turn`` because ``_ensure_worker`` short-circuited on the missing
+    db_path. After the v0.4.1 fix, the worker spawns and the WriteTask lands
+    on the queue.
+    """
+    # Stub mcp_start so initialize() doesn't actually spawn `icm serve`.
+    monkeypatch.setattr(cli_runner, "mcp_start", lambda *a, **kw: None)
+    # Stub mapping to return a single deterministic trigger.
+    monkeypatch.setattr(
+        "hermes_icm_memory.hooks.mapping.detect_triggers",
+        lambda *a, **kw: [("errors-resolved", "high", "fixed it", ["fix"])],
+    )
+    # Capture WriteTasks by intercepting put_nowait — avoids racing the worker.
+    captured: list[WriteTask] = []
+
+    def fake_put_nowait(self: queue.Queue[WriteTask], task: WriteTask) -> None:
+        captured.append(task)
+
+    provider = IcmMemoryProvider()
+    # No ``provider._config["isolated"] = True`` — default-shared path.
+    provider.initialize(
+        session_id="s1", hermes_home=tmp_hermes_home, profile="default"
+    )
+    provider._available = True
+
+    # Sanity: this is the case we're guarding (shared-DB mode).
+    assert provider._db_path is None, (
+        "fixture invariant: default-shared mode keeps _db_path None"
+    )
+
+    # Drive _ensure_worker once so the queue exists, then patch its put_nowait.
+    assert provider._ensure_worker(), (
+        "regression: _ensure_worker returned False in default-shared mode"
+    )
+    assert provider._write_queue is not None
+    monkeypatch.setattr(
+        type(provider._write_queue), "put_nowait", fake_put_nowait
+    )
+
+    provider.sync_turn(user_content="u", assistant_content="a")
+
+    # Stop the worker so the daemon thread doesn't leak across tests.
+    _kill_worker(provider)
+
+    assert [t.topic for t in captured] == ["errors-resolved"], (
+        "regression: sync_turn dropped the trigger in default-shared mode"
+    )
+    assert captured[0].importance == "high"
+    assert captured[0].keywords == ("fix",)
