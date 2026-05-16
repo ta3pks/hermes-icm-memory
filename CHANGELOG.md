@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.6] — 2026-05-17
+
+**Bug fix — double indicator footer (stale ``📚 —`` heartbeat + fresh
+``📚 N`` both ended up in the reply).**
+
+### Symptom
+
+Telegram replies were showing two ``📚 …`` lines stacked at the bottom:
+
+    📚 —
+
+    📚 1
+
+### Root cause
+
+Hook fire order. ``system_prompt_block`` renders its directive AT
+START of turn — at which point ``_INDICATOR_STATE['recall_count']`` is
+still 0 from the previous turn's reset, so the directive instructed
+the LLM to copy the heartbeat ``📚 —``. THEN prefetch fired and
+populated ``recall_count = 1``. At the end of the turn,
+``transform_llm_output`` rendered the fresh ``📚 1`` footer and tried
+to de-dupe with an exact-match check — but ``📚 —`` ≠ ``📚 1``, so it
+didn't skip; it appended its own footer. Two indicators in the reply.
+
+### Fixed
+
+- **Hook now strips any trailing ``📚 …`` line and re-appends a fresh
+  one,** making the hook the single source of truth for the footer.
+  Whether the model copied a stale heartbeat, an exact match, or
+  nothing at all, the output ends up with exactly one
+  freshly-rendered footer.
+- The ``system_prompt_block`` directive remains as a fallback for code
+  paths the hook can't reach (e.g. streamed partials) — when the hook
+  IS wired, anything the directive made the model produce gets
+  collapsed into the canonical footer.
+
+Regression guards in ``tests/test_provider.py``:
+- ``test_indicator_transform_strips_stale_footer_and_replaces``
+- ``test_indicator_transform_strips_exact_match_too``
+
 ## [0.4.5] — 2026-05-17
 
 **Bug fix — operator config under `plugins.hermes-icm-memory.*` in

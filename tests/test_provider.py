@@ -477,16 +477,40 @@ def test_indicator_transform_heartbeat_when_silent(reset_indicator_state: None) 
     assert out.endswith("📚 —")
 
 
-def test_indicator_transform_skips_when_model_already_complied(
+def test_indicator_transform_strips_stale_footer_and_replaces(
     reset_indicator_state: None,  # noqa: ARG001
 ) -> None:
-    """LLM followed the fallback directive → return None so we don't double."""
+    """v0.4.6 — hook is the single source of truth for the footer. Any
+    pre-existing ``📚 …`` trailing line (often a stale ``📚 —`` heartbeat
+    the model copied from the system_prompt_block directive that rendered
+    BEFORE prefetch populated state) gets stripped before the fresh
+    footer is appended."""
+    from hermes_icm_memory import provider as _prov
+
+    _prov._capture_recall_count(3)
+    # Model copied the directive's stale heartbeat while real recall was 3.
+    response = "Here is my answer.\n\n📚 —"
+    out = _prov._do_indicator_transform(response_text=response)
+    assert out is not None
+    # Stale heartbeat is gone; fresh footer wins.
+    assert out.count("📚") == 1
+    assert out.endswith("📚 3")
+    assert out.startswith("Here is my answer.")
+
+
+def test_indicator_transform_strips_exact_match_too(
+    reset_indicator_state: None,  # noqa: ARG001
+) -> None:
+    """Even when the stale and fresh footers match, the hook still owns
+    the output: strip + append produces exactly one footer (no double)."""
     from hermes_icm_memory import provider as _prov
 
     _prov._capture_recall_count(3)
     response = "Here is my answer.\n\n📚 3"
     out = _prov._do_indicator_transform(response_text=response)
-    assert out is None, "must return None when response already ends with the footer"
+    assert out is not None
+    assert out.count("📚") == 1
+    assert out.endswith("📚 3")
 
 
 def test_indicator_transform_returns_none_on_empty_text(

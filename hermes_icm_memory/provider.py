@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import threading
 from pathlib import Path
@@ -98,32 +99,46 @@ def _render_indicator_footer(recall: int, save: str | None) -> str:
     return " · ".join(parts) if parts else "📚 —"
 
 
+#: Matches a single-line indicator footer the model (or this hook) may have
+#: previously appended — used by :func:`_do_indicator_transform` to strip
+#: any stale instance before appending the freshly-rendered one.
+#:
+#: v0.4.6 — the v0.4.5 exact-match de-dupe was insufficient because the
+#: ``system_prompt_block`` directive renders BEFORE prefetch fires, so the
+#: model copies a ``📚 —`` heartbeat into its reply while the hook (which
+#: runs AFTER prefetch) sees the real ``📚 N`` count. Exact-match doesn't
+#: catch the mismatch — both footers end up in the reply. Switching the
+#: hook to be the single source of truth (strip-then-append) fixes that
+#: AND demotes the fallback directive to a no-op when the hook is wired.
+_FOOTER_LINE_RE: Final[re.Pattern[str]] = re.compile(
+    r"\n*📚[^\n]*$",
+)
+
+
 def _do_indicator_transform(
     response_text: str = "",
     **_kwargs: Any,
 ) -> str | None:
     """``transform_llm_output`` plugin-hook implementation.
 
-    Reads :data:`_INDICATOR_STATE`, appends the footer to ``response_text``,
-    and resets the state for the next turn. Returns ``None`` (leave text
-    unchanged) when the response is empty OR already ends with the same
-    footer — the latter avoids a double-append when the LLM also complied
-    with the ``system_prompt_block`` directive (belt-and-suspenders mode).
+    Reads :data:`_INDICATOR_STATE`, strips any trailing ``📚 …`` footer
+    line (a stale one the model may have copied from the
+    ``system_prompt_block`` directive, OR the prior turn's footer if the
+    upstream pipeline re-feeds output anywhere), and appends a fresh one
+    rendered from the current state. Resets the state for the next turn.
+    Returns ``None`` when the response is empty.
     """
     if not response_text:
         return None
-    footer = _render_indicator_footer(
-        _INDICATOR_STATE.get("recall_count", 0),
-        _INDICATOR_STATE.get("last_save_topic"),
-    )
-    stripped = response_text.rstrip()
-    # Reset for the next turn regardless of which branch we take below —
-    # both branches consume the same per-turn snapshot.
+    snapshot_recall = int(_INDICATOR_STATE.get("recall_count", 0) or 0)
+    snapshot_save = _INDICATOR_STATE.get("last_save_topic")
+    # Reset BEFORE building the new text so the next-turn snapshot starts
+    # clean even if the format step somehow raises.
     _INDICATOR_STATE["recall_count"] = 0
     _INDICATOR_STATE["last_save_topic"] = None
-    if stripped.endswith(footer):
-        return None  # LLM complied; leave its text alone.
-    return f"{stripped}\n\n{footer}"
+    footer = _render_indicator_footer(snapshot_recall, snapshot_save)
+    cleaned = _FOOTER_LINE_RE.sub("", response_text).rstrip()
+    return f"{cleaned}\n\n{footer}"
 
 
 class IcmMemoryProvider:
