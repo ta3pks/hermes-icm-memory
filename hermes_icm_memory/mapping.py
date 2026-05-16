@@ -9,6 +9,9 @@ A "trigger" is a 4-tuple ``(topic, importance, content, keywords)`` ready to be
 shaped into a write task by the caller. Multiple triggers may fire from one turn
 (e.g. an assistant message that both fixes a bug and records a decision); the
 caller is responsible for deduplication if any.
+
+v0.4.1 — Added Hungarian trigger patterns (AD-21) + feedback correction pattern
+        + MAPPING entries for feedback + session-summary categories.
 """
 
 from __future__ import annotations
@@ -20,12 +23,15 @@ from typing import Final
 Trigger = tuple[str, str, str, list[str]]
 
 #: FR16 topic ↔ importance matrix. Frozen public surface (NFR-MAINT-1).
+#: v0.4.1: Added "feedback" and "session-summary" categories.
 MAPPING: Final[dict[str, dict[str, str]]] = {
     "decisions": {"topic_template": "decisions-{project}", "importance": "high"},
     "errors-resolved": {"topic_template": "errors-resolved", "importance": "high"},
     "preferences": {"topic_template": "preferences", "importance": "critical"},
     "context": {"topic_template": "context-{project}", "importance": "high"},
     "learnings": {"topic_template": "learnings", "importance": "high"},
+    "feedback": {"topic_template": "feedback-corrections", "importance": "high"},
+    "session-summary": {"topic_template": "session-{project}", "importance": "high"},
 }
 
 _DEFAULT_PROJECT: Final[str] = "default"
@@ -34,35 +40,66 @@ _KEYWORDS_LIMIT: Final[int] = 5
 
 # Compiled patterns. Word boundaries (\b) keep partial matches like "fixedly" out.
 # All searched case-insensitively.
+# v0.4.1: Added Hungarian patterns for all categories.
+
 _ERRORS_RESOLVED_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"\b(fixed|resolved|the bug was|root cause|fix(?:ed)? it|"
     r"the issue was|that explains|the problem was|caused by|"
-    r"turns? out the|was due to|reason it (?:failed|broke|didn'?t))",
+    r"turns? out the|was due to|reason it (?:failed|broke|didn'?t)|"
+    # Hungarian
+    r"javít(?:ott|va|va lett)|megold(?:ott|va|ódott)|"
+    r"hiba (?:megoldva|javítva)|gyökér_ok|"
+    r"az ok (?:az volt|az)|a probléma (?:az volt|megoldódott)|"
+    r"kiderült hogy|ez (?:miatt| miatt) volt)\b",
     re.IGNORECASE,
 )
 _DECISIONS_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"\b(decided to|going with|we'll use|let's use|chose to|"
     r"let'?s go with|we should use|we should go|"
-    r"I'm going to use|the approach is)",
+    r"I'm going to use|the approach is|"
+    # Hungarian
+    r"eldöntöttük|eldöntöttem|fogjuk használni|legyen|"
+    r"választottuk|fogjuk csinálni|a megoldás|"
+    r"úgy döntöttünk|úgy döntöttem|a megközelítés)\b",
     re.IGNORECASE,
 )
 _PREFERENCES_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"\b(always (?:use|do)|never (?:use|do)|prefer|"
     r"I (?:like|love|hate|can'?t stand) when|"
     r"my (?:favourite|favorite|preferred)|"
-    r"don'?t (?:like|use|do)|won'?t use)",
+    r"don'?t (?:like|use|do)|won'?t use|"
+    # Hungarian
+    r"mindig (?:használ|csinál)|soha (?:ne |nem )?(?:használ|csinál)|"
+    r"szeretem|nem szeretem|kedvenc|"
+    r"ne csináld|preferál(?:om|juk)|"
+    r"nem akar(?:om|juk)|inkább)\b",
     re.IGNORECASE,
 )
 _LEARNINGS_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"\b(learned|turns out|TIL|now I understand|"
     r"interestingly|actually it (?:works|seems|turns)|"
     r"the key insight|what I didn'?t know|"
-    r"it (?:turns|turned) out that)",
+    r"it (?:turns|turned) out that|"
+    # Hungarian
+    r"megtanultam|kiderült|hát igen|most már értem|"
+    r"érdekes módon|a lényeg|ami még nem (?:volt|tudtam) clear|"
+    r"svgounding|kiderült hogy)\b",
+    re.IGNORECASE,
+)
+_FEEDBACK_CORRECTION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\b(that'?s wrong|incorrect|no[,!.]|that'?s not right|"
+    r"actually[,]|correction[!:]|fix that|wrong answer|"
+    r"not quite|that'?s (?:incorrect|false)|"
+    # Hungarian
+    r"ez nem (?:jó|igaz)|nem így|rossz (?:válasz|megoldás)|"
+    r"nem(!|,|\.)|helyesbítés|javítás|"
+    r"inkább úgy|nem, hanem)\b",
     re.IGNORECASE,
 )
 
-# Word tokenizer for keywords extraction. Lowercase a-z plus digits, length ≥ 3.
-_WORD_TOKEN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]{3,}")
+# Word tokenizer for keywords extraction.
+# v0.4.1: Added Hungarian accented chars (áéíóöőúüű) + length ≥ 2 (was 3).
+_WORD_TOKEN: Final[re.Pattern[str]] = re.compile(r"[a-záéíóöőúüű0-9]{2,}")
 
 
 def _resolve_topic(category: str, project: str | None) -> str:
@@ -111,6 +148,7 @@ def detect_triggers(
     3. decisions
     4. learnings
     5. preferences
+    6. feedback corrections (v0.4.1)
     """
     out: list[Trigger] = []
 
@@ -159,6 +197,17 @@ def detect_triggers(
             (
                 _resolve_topic("preferences", project),
                 MAPPING["preferences"]["importance"],
+                user_text[:_CONTENT_LIMIT],
+                _extract_keywords(user_text),
+            )
+        )
+
+    # 6. feedback corrections (user_text — when user corrects the AI). v0.4.1
+    if _FEEDBACK_CORRECTION_PATTERN.search(user_text):
+        out.append(
+            (
+                _resolve_topic("feedback", project),
+                MAPPING["feedback"]["importance"],
                 user_text[:_CONTENT_LIMIT],
                 _extract_keywords(user_text),
             )

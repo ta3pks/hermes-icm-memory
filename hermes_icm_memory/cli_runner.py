@@ -14,6 +14,8 @@ Architecture compliance:
 v0.4 — The internal subprocess transport has been replaced with a warm MCP
 daemon (:class:`mcp_client.IcmMcpClient`). The public ``run_*`` surface is
 preserved so ``hooks.py`` and ``provider.py`` require no changes.
+
+v0.4.1 — Added ``run_wake_up`` for session-start critical-facts injection.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ __all__ = [
     "run_recall",
     "run_store",
     "run_topics",
+    "run_wake_up",
 ]
 
 logger = logging.getLogger(__name__)
@@ -70,7 +73,6 @@ def mcp_start(
     except OSError as exc:
         _client = None
         raise ICMConnectionError(str(exc)) from exc
-
 
 def mcp_stop() -> None:
     """Shut down the MCP daemon (no-op if not running)."""
@@ -145,3 +147,34 @@ def run_health(
     """Run ``icm health`` via the MCP daemon."""
     cl = _get_client()
     return cl.call_health(topic=topic)
+
+
+def run_wake_up(
+    db_path: Path | None,  # noqa: ARG001
+    timeout_ms: int,  # noqa: ARG001
+    *,
+    project: str | None = None,
+    max_tokens: int = 400,
+) -> str:
+    """Run ``icm wake_up`` via the MCP daemon. Returns formatted wake-up text.
+
+    Injects high-importance memories into the session start context.
+    Returns empty string if wake-up is disabled or fails.
+    """
+    try:
+        cl = _get_client()
+        return cl.call_wake_up(project=project, max_tokens=max_tokens)
+    except ICMConnectionError as exc:
+        logger.warning(
+            "run_wake_up: MCP client error: %r",
+            exc,
+            extra={"err": repr(exc)},
+        )
+        return ""
+    except Exception as exc:
+        logger.warning(
+            "run_wake_up: unexpected error: %r",
+            exc,
+            extra={"err": repr(exc)},
+        )
+        return ""

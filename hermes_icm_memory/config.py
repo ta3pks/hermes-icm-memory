@@ -224,6 +224,54 @@ _SCHEMA_ENTRIES: Final[list[dict[str, Any]]] = [
         "required": False,
         "description": "Bounded queue capacity for pending classifications.",
     },
+    # ---- v0.4.1 additions (P0-P2 memory persistence improvements) -----------
+    {
+        "key": "wake_up_enabled",
+        "type": "bool",
+        "default": True,
+        "secret": False,
+        "required": False,
+        "description": (
+            "If true, inject icm_wake_up critical/high memories into "
+            "the first system_prompt_block of each session. Closes the "
+            "recall-failure gap (P0-3)."
+        ),
+    },
+    {
+        "key": "wake_up_max_tokens",
+        "type": "int",
+        "default": 400,
+        "secret": False,
+        "required": False,
+        "description": (
+            "Approximate character budget for the wake-up injection. "
+            "Higher values provide more context but consume more prompt tokens."
+        ),
+    },
+    {
+        "key": "session_summary_enabled",
+        "type": "bool",
+        "default": True,
+        "secret": False,
+        "required": False,
+        "description": (
+            "If true, store a session-end summary to ICM when the session "
+            "closes. Uses accumulated recent_stores to build the summary. "
+            "Closes the recall-failure gap (P0-2)."
+        ),
+    },
+    {
+        "key": "project_name",
+        "type": "string",
+        "default": "",
+        "secret": False,
+        "required": False,
+        "description": (
+            "Project name for topic scoping. When set, stored memories use "
+            "topic templates like 'decisions-<project>' instead of "
+            "'decisions-default'. Empty string falls back to 'default'."
+        ),
+    },
 ]
 
 #: Per-key minimum integer values. Keys absent from this map have no lower bound
