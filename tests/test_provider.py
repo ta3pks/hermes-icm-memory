@@ -581,3 +581,72 @@ def test_register_tolerates_minimal_ctx() -> None:
         pass
 
     register(_Empty())  # must not raise
+
+
+# ---------- v0.4.4: shutdown doesn't kill the shared MCP daemon --------------
+
+
+def test_shutdown_does_not_kill_shared_mcp_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: pre-v0.4.4 the per-instance ``shutdown()`` called
+    ``cli_runner.mcp_stop()`` which nulled the module-level singleton
+    ``_client`` — fine for a single-instance world but broken for the
+    gateway, where ``review_agent`` creates short-lived secondary providers
+    whose shutdown killed the daemon for the still-active main agent. The
+    fix moves daemon teardown to an ``atexit`` hook; per-instance shutdown
+    is a no-op for the daemon. This test fails if anyone re-introduces
+    a ``cli_runner.mcp_stop()`` call inside ``IcmMemoryProvider.shutdown``.
+    """
+    from hermes_icm_memory import cli_runner as _cr
+
+    stop_call_count = [0]
+
+    def _spy_stop() -> None:
+        stop_call_count[0] += 1
+
+    monkeypatch.setattr(_cr, "mcp_stop", _spy_stop)
+
+    IcmMemoryProvider().shutdown()
+    IcmMemoryProvider().shutdown()
+    IcmMemoryProvider().shutdown()
+
+    assert stop_call_count[0] == 0, (
+        "provider.shutdown must NOT call cli_runner.mcp_stop — the daemon is "
+        "process-wide and is torn down by the atexit hook instead"
+    )
+
+
+def test_initialize_idempotent_path_still_revalidates_mcp_client(
+    tmp_hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: pre-v0.4.4 the ``args_key`` idempotent early-return
+    skipped ``mcp_start`` entirely on re-init, so if something nulled
+    ``cli_runner._client`` between turns (sub-agent shutdown, etc.) the
+    daemon was never re-spawned. v0.4.4 always re-calls ``mcp_start``
+    (it's idempotent at the cli_runner layer — no-op when _client is set
+    — so cheap on the happy path)."""
+    from hermes_icm_memory import cli_runner as _cr
+
+    start_call_count = [0]
+
+    def _spy_start(**_kw: Any) -> None:
+        start_call_count[0] += 1
+
+    monkeypatch.setattr(_cr, "mcp_start", _spy_start)
+
+    provider = IcmMemoryProvider()
+    provider.initialize(
+        session_id="s1", hermes_home=tmp_hermes_home, profile="default",
+    )
+    assert start_call_count[0] == 1, "first init must call mcp_start once"
+
+    # Idempotent re-init with same args still re-validates the daemon.
+    provider.initialize(
+        session_id="s1", hermes_home=tmp_hermes_home, profile="default",
+    )
+    assert start_call_count[0] == 2, (
+        "re-init must re-call mcp_start so a previously-nulled _client gets "
+        "re-spawned — the v0.4.4 fix for the silent-recall regression"
+    )

@@ -5,6 +5,61 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.4] — 2026-05-17
+
+**Bug fix — recall stopped working mid-session after a sub-agent
+shutdown killed the shared MCP daemon.**
+
+### Symptom
+
+After v0.4.3 deployed and the gateway restarted, the indicator footer
+showed up reliably but the `📚 N` half stayed at `📚 —` (heartbeat) on
+every turn. Logs revealed the cause:
+`prefetch: recall failed; returning empty:
+ICMConnectionError('MCP client not started — call mcp_start first')`.
+The icm-serve daemon spawned at first init was no longer running, and
+re-init was short-circuiting via `args_key` match without re-spawning.
+
+### Root cause
+
+The pre-v0.4.4 lifecycle:
+
+1. Main agent's `provider.initialize()` called `cli_runner.mcp_start()`
+   → spawned warm icm-serve daemon → set module-level `_client`.
+2. A short-lived sub-agent (Hermes' `review_agent` flow) loaded its own
+   `IcmMemoryProvider` instance, did its work, then called
+   `provider.shutdown()` → `cli_runner.mcp_stop()` → killed the
+   subprocess and nulled the shared `_client`.
+3. Next main-agent turn called `memory_manager.initialize_all` again →
+   `provider.initialize` hit the `args_key` idempotent early-return →
+   `mcp_start` was NOT re-called → `_client` stayed `None`.
+4. Every subsequent `prefetch` raised `ICMConnectionError`.
+
+### Fixed
+
+- **`IcmMemoryProvider.shutdown` no longer calls `cli_runner.mcp_stop`.**
+  The warm daemon is a process-wide singleton; per-instance shutdown
+  must not kill it. Cleanup moved to an `atexit` hook registered in
+  `cli_runner` so the daemon is closed deterministically on process
+  exit. Regression guard:
+  `tests/test_provider.py::test_shutdown_does_not_kill_shared_mcp_daemon`.
+- **`IcmMemoryProvider.initialize` now always re-calls `cli_runner.
+  mcp_start`,** even on the idempotent `args_key` re-init path.
+  `mcp_start` is itself idempotent (no-op when `_client` is set) so
+  this is cheap on the happy path but re-spawns the daemon if anything
+  nulled `_client` between turns. Regression guard:
+  `tests/test_provider.py::test_initialize_idempotent_path_still_revalidates_mcp_client`.
+
+### Added
+
+- **`cli_runner.mcp_start` INFO log** on actual daemon spawn (with
+  subprocess pid) — pre-v0.4.4 a silent `_client is None` was
+  indistinguishable from "never tried"; the pid stamp closes that
+  ambiguity for future post-mortems.
+- **`cli_runner.mcp_stop` INFO log** on actual teardown (also with pid).
+- **`atexit` hook** in `cli_runner` to ensure the daemon is closed on
+  interpreter shutdown.
+
 ## [0.4.3] — 2026-05-17
 
 **Programmatic indicator footer — append the `📚 N · 💾 topic` line via

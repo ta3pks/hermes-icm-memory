@@ -18,6 +18,8 @@ preserved so ``hooks.py`` and ``provider.py`` require no changes.
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -53,6 +55,12 @@ def mcp_start(
     Module-level singleton: the first call spawns ``icm serve``; subsequent
     calls are no-ops. Raises ``ICMNotFoundError`` if ``icm`` is missing,
     or ``ICMConnectionError`` if the MCP handshake fails.
+
+    v0.4.4 — emits an INFO log on actual spawn (with subprocess pid when
+    available) so the gateway log shows definitively whether the warm
+    daemon ever came up. Pre-v0.4.4 a silent ``_client is None`` was
+    indistinguishable from "never tried"; the daemon-PID stamp closes
+    that ambiguity for future post-mortems.
     """
     global _client  # noqa: PLW0603
     if _client is not None:
@@ -61,6 +69,11 @@ def mcp_start(
         cl = mcp_client.IcmMcpClient()
         cl.start(db_path=db_path, use_embeddings=use_embeddings)
         _client = cl
+        _pid = getattr(getattr(cl, "_proc", None), "pid", None)
+        logger.info(
+            "mcp_start: icm serve daemon started (pid=%s, use_embeddings=%s)",
+            _pid, use_embeddings,
+        )
     except FileNotFoundError as exc:
         _client = None
         raise ICMNotFoundError(str(exc)) from exc
@@ -73,11 +86,34 @@ def mcp_start(
 
 
 def mcp_stop() -> None:
-    """Shut down the MCP daemon (no-op if not running)."""
+    """Shut down the MCP daemon (no-op if not running).
+
+    v0.4.4 — this is now ONLY called from the :func:`atexit` hook below
+    (and from tests). Per-provider ``shutdown`` no longer invokes it
+    because the daemon is a process-wide singleton — see the comment in
+    ``provider.IcmMemoryProvider.shutdown``.
+    """
     global _client  # noqa: PLW0603
     if _client is not None:
+        _pid = getattr(getattr(_client, "_proc", None), "pid", None)
+        logger.info("mcp_stop: stopping icm serve daemon (pid=%s)", _pid)
         _client.close()
         _client = None
+
+
+def _atexit_stop() -> None:
+    """Final daemon teardown on interpreter shutdown.
+
+    Registered via :func:`atexit.register` at module import time. The
+    daemon is a process-wide singleton (see ``mcp_stop`` docstring) and
+    must outlive any individual ``IcmMemoryProvider.shutdown`` call;
+    cleanest deterministic teardown point is therefore process exit.
+    """
+    with contextlib.suppress(Exception):  # atexit must never raise
+        mcp_stop()
+
+
+atexit.register(_atexit_stop)
 
 
 # ------------------------------------------------------------------ public helpers

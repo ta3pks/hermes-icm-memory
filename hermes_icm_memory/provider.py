@@ -204,33 +204,42 @@ class IcmMemoryProvider:
         row 8. Default-shared mode never reaches the OSError branch.
         """
         args_key = (session_id, str(hermes_home), profile)
-        if self._init_args == args_key:
-            return
+        is_repeat = self._init_args == args_key
 
-        if self._config_bool("isolated"):
-            try:
-                db_path = config.resolve_db_path(hermes_home, profile)
-                config.mkdir_parent(db_path)
-            except OSError as exc:
-                logger.warning(
-                    "initialize failed: hermes_home not writable; "
-                    "provider self-disabling: %r",
-                    exc,
-                    extra={"hermes_home": str(hermes_home), "err": repr(exc)},
-                )
-                self._available = False
-                self._init_args = args_key
-                return
-            self._db_path = db_path
-        # else: default-shared — ``_db_path`` stays ``None`` and ``cli_runner``
-        # omits ``--db`` so ``icm`` uses its canonical OS-default DB.
+        if not is_repeat:
+            if self._config_bool("isolated"):
+                try:
+                    db_path = config.resolve_db_path(hermes_home, profile)
+                    config.mkdir_parent(db_path)
+                except OSError as exc:
+                    logger.warning(
+                        "initialize failed: hermes_home not writable; "
+                        "provider self-disabling: %r",
+                        exc,
+                        extra={"hermes_home": str(hermes_home), "err": repr(exc)},
+                    )
+                    self._available = False
+                    self._init_args = args_key
+                    return
+                self._db_path = db_path
+            # else: default-shared — ``_db_path`` stays ``None`` and ``cli_runner``
+            # omits ``--db`` so ``icm`` uses its canonical OS-default DB.
 
-        self._session_id = session_id
-        self._init_args = args_key
-        self._hermes_home = Path(hermes_home)
-        self._hermes_config = self._read_hermes_config()
+            self._session_id = session_id
+            self._init_args = args_key
+            self._hermes_home = Path(hermes_home)
+            self._hermes_config = self._read_hermes_config()
 
-        # v0.4 — start the warm MCP daemon for all subsequent CLI calls.
+        # v0.4.4 — ALWAYS ensure the warm MCP daemon is up, even on the
+        # idempotent re-init path. Pre-v0.4.4 this call lived inside the
+        # ``not is_repeat`` branch, which meant any code path that nulled
+        # ``cli_runner._client`` between turns (sub-agent shutdown, the
+        # gateway's review_agent flow, etc.) would leave subsequent
+        # ``provider.prefetch`` calls raising
+        # ``ICMConnectionError('MCP client not started')`` because re-init
+        # short-circuited via ``args_key`` match. ``mcp_start`` is itself
+        # idempotent (no-op when ``_client`` is already set) so this is
+        # cheap on the happy path.
         try:
             cli_runner.mcp_start(
                 db_path=self._db_path,
@@ -700,16 +709,28 @@ class IcmMemoryProvider:
     # ------------------------------------------------------------------ shutdown
 
     def shutdown(self) -> None:
-        """Stop the MCP daemon and clean up resources."""
-        # v0.4 — shut down the MCP daemon gracefully.
-        try:
-            cli_runner.mcp_stop()
-        except Exception as exc:
-            logger.warning(
-                "shutdown: MCP daemon stop error: %r",
-                exc,
-                extra={"err": repr(exc)},
-            )
+        """Per-instance cleanup. Does NOT stop the MCP daemon.
+
+        v0.4.4 — the warm ``icm serve`` daemon spawned by
+        :func:`cli_runner.mcp_start` is a PROCESS-wide singleton shared by
+        every ``IcmMemoryProvider`` instance in the gateway (the
+        ``review_agent`` flow creates short-lived secondary instances). If
+        per-instance shutdown killed the daemon, the next call to
+        ``provider.prefetch`` on the main agent would see
+        ``cli_runner._client is None`` and raise
+        ``ICMConnectionError('MCP client not started')`` — that was the
+        v0.4.3 silent-recall regression.
+
+        Daemon teardown is registered via :func:`atexit.register` inside
+        :mod:`hermes_icm_memory.cli_runner` so the subprocess is closed
+        cleanly when the gateway process exits — no per-instance call
+        needed.
+
+        Kept as a no-op so subclasses can override and so future per-instance
+        resources (file handles, threads owned by this instance only, etc.)
+        have a hook to clean up if added.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # Internal helpers
