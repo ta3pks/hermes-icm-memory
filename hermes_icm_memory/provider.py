@@ -443,7 +443,7 @@ class IcmMemoryProvider:
         # default DB" sentinel (default-shared mode), not a "not initialized"
         # signal. The ``_init_args`` check upstream handles the latter.
         try:
-            hooks.run_prefetch(
+            hits = hooks.run_prefetch(
                 query=query,
                 db_path=self._db_path,
                 limit=recall_limit,
@@ -458,6 +458,9 @@ class IcmMemoryProvider:
                 extra={"err": repr(exc)},
             )
             return ""
+        # v0.4.2 — feed the system_prompt_block indicator footer with the
+        # capped hit count so the user sees a `📚 N` heartbeat per turn.
+        self._worker_state.recent_recall_count = len(hits[:recall_limit])
         # Bound the cache to the latest entry. ``system_prompt_block`` only
         # reads ``_latest_prefetch_key`` (NFR-PERF-4), so older entries are
         # dead weight that would otherwise leak monotonically across the
@@ -479,11 +482,21 @@ class IcmMemoryProvider:
 
         Reads the cache only — never invokes ``cli_runner`` (NFR-PERF-4).
         Disabled prefetch / empty cache → ``""``.
+
+        v0.4.2 — also appends a user-visible indicator footer directive
+        (📚 N · 💾 topic) that the LLM is asked to copy verbatim to the end
+        of its reply. Heartbeats with ``📚 —`` on silent turns so the user
+        always sees evidence the plugin is alive.
         """
         blocks: list[str] = []
-
-        # Part 1: recently stored memories (from async classifier).
         ws = self._worker_state
+
+        # Snapshot indicator state BEFORE Part 1 drains recent_stores. Last
+        # save in the buffer wins the 💾 slot (most recent = most relevant).
+        recall_count = ws.recent_recall_count if ws else 0
+        last_save_topic = ws.recent_stores[-1][0] if (ws and ws.recent_stores) else None
+
+        # Part 1: recently stored memories (from async classifier + regex path).
         if ws and ws.recent_stores:
             store_lines = ["🧠 New memories stored:"]
             for topic, content in ws.recent_stores:
@@ -508,7 +521,28 @@ class IcmMemoryProvider:
                     extra={"err": repr(exc)},
                 )
 
+        # Part 3: indicator footer directive. Always fires (heartbeat on
+        # silent turns) so the user has a per-turn liveness signal.
+        blocks.append(self._render_indicator_directive(recall_count, last_save_topic))
+
+        # Reset per-turn counters now that the directive carries them.
+        if ws:
+            ws.recent_recall_count = 0
+
         return "\n\n".join(blocks) if blocks else ""
+
+    @staticmethod
+    def _render_indicator_directive(recall_count: int, save_topic: str | None) -> str:
+        """Build the literal indicator block the LLM is asked to echo verbatim."""
+        parts: list[str] = [f"📚 {recall_count}"] if recall_count > 0 else []
+        if save_topic:
+            parts.append(f"💾 {save_topic}")
+        footer = " · ".join(parts) if parts else "📚 —"
+        return (
+            "💡 ICM-INDICATOR: At the very end of your reply, on a new line, "
+            f"append this footer VERBATIM: `{footer}` — do not paraphrase, "
+            "translate, or wrap in extra formatting."
+        )
 
     # ------------------------------------------------------------------ sync_turn
 

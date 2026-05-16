@@ -110,6 +110,14 @@ class WorkerState:
     # v0.5 — recent stores buffer for user-facing notifications.
     recent_stores: list[tuple[str, str]] = field(default_factory=list)
 
+    # v0.4.2 — counters consumed by the system_prompt_block indicator footer.
+    # ``recent_recall_count`` is the hit count from the LAST prefetch on this
+    # provider; ``provider.system_prompt_block`` reads it, renders the
+    # ``📚 N`` half of the footer, and resets it to 0 so the next turn
+    # starts clean. ``recent_stores`` doubles as the save-side feed
+    # (last entry → ``💾 <topic>``) and is already cleared in-place.
+    recent_recall_count: int = 0
+
 
 # ---------- Worker loop ------------------------------------------------------
 
@@ -163,6 +171,17 @@ def worker_loop(
 # ---------- Classifier loop ----------------------------------------------------
 
 
+def _scope_classifier_topic(category: str, *, project: str | None) -> str:
+    """Resolve a classifier-returned bare category into the corpus-scoped topic.
+
+    Unknown categories pass through unchanged so a forward-compatible LLM
+    output (a future category the mapping doesn't ship yet) is not dropped.
+    """
+    if category in mapping.MAPPING:
+        return mapping._resolve_topic(category, project)
+    return category
+
+
 def classifier_loop(
     *,
     state: WorkerState,
@@ -208,8 +227,17 @@ def classifier_loop(
             continue
 
         # LLM wants to store something — enqueue a write task.
+        # v0.4.2 — route the classifier's bare category through mapping so the
+        # final ICM topic matches the corpus convention (errors-resolved-{project}
+        # instead of bare errors-resolved). LLM-suggested project wins; otherwise
+        # the originally-classified task's project; otherwise the mapping default.
+        # If the LLM returns a topic mapping doesn't know about, fall back to the
+        # raw value so we never drop a valid store on an unknown category.
+        scoped_topic = _scope_classifier_topic(
+            result.topic, project=result.project or task.project,
+        )
         write_task = WriteTask(
-            topic=result.topic,
+            topic=scoped_topic,
             importance=result.importance,
             content=result.content,
             keywords=result.keywords,
@@ -217,17 +245,17 @@ def classifier_loop(
         try:
             write_queue.put_nowait(write_task)
             # Track for user-facing notification (thread-safe append on CPython).
-            state.recent_stores.append((result.topic, result.content[:120]))
+            state.recent_stores.append((scoped_topic, result.content[:120]))
         except queue.Full:
             logger.debug(
                 "classifier: write queue full; dropping classified memory",
-                extra={"topic": result.topic},
+                extra={"topic": scoped_topic},
             )
         except Exception as exc:
             logger.debug(
                 "classifier: enqueue failed: %r",
                 exc,
-                extra={"err": repr(exc), "topic": result.topic},
+                extra={"err": repr(exc), "topic": scoped_topic},
             )
 
         classify_queue.task_done()
@@ -547,6 +575,10 @@ def submit_triggers(
         )
         try:
             state.write_queue.put_nowait(task)
+            # v0.4.2 — feed the user-visible indicator (system_prompt_block
+            # footer). Parallels the same append in _classifier_worker so both
+            # detection paths surface saves to the LLM.
+            state.recent_stores.append((topic, content[:120]))
         except queue.Full:
             _warn_overflow_once(state)
         except Exception as exc:  # defensive — never raise into the turn
@@ -595,7 +627,10 @@ def _submit_periodic_context(
         return
     if every_n_turns <= 0 or turn_index <= 0 or turn_index % every_n_turns != 0:
         return
-    topic = mapping.MAPPING["context"]["topic_template"].format(project=project or "default")
+    # v0.4.2 — route through the canonical resolver so the project-fallback
+    # default stays in lockstep with mapping._DEFAULT_PROJECT instead of
+    # drifting via a duplicated literal "default".
+    topic = mapping._resolve_topic("context", project)
     importance = mapping.MAPPING["context"]["importance"]
     content = f"periodic progress checkpoint: turn {turn_index}"
     task = WriteTask(topic=topic, importance=importance, content=content, keywords=())

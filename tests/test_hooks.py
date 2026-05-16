@@ -207,9 +207,13 @@ def test_system_prompt_block_formats_top_k_plus_summary(
     # Project context line names the unique topics observed.
     assert "preferences" in block
     assert "decisions-foo" in block
-    # Empty cache returns "".
+    # Empty cache → only the v0.4.2 indicator heartbeat directive remains
+    # (always-on liveness signal). No prefetch block, no stores block.
     empty_provider = IcmMemoryProvider()
-    assert empty_provider.system_prompt_block() == ""
+    empty_block = empty_provider.system_prompt_block()
+    assert "📚 —" in empty_block
+    assert "🧠" not in empty_block
+    assert "📖 Recalled memories" not in empty_block
 
 
 # ---------- AC8: sync_turn enqueues each detected trigger
@@ -673,10 +677,16 @@ def test_worker_loop_defensive_swallows_unexpected_exception(
 def test_provider_prefetch_disabled_returns_empty(
     initialized_provider: IcmMemoryProvider,
 ) -> None:
-    """``prefetch_enabled=False`` short-circuits both methods to ``""``."""
+    """``prefetch_enabled=False`` short-circuits prefetch and the recall block.
+
+    v0.4.2 — ``system_prompt_block`` still emits the indicator heartbeat
+    (📚 —) since liveness is independent of whether prefetch is enabled.
+    """
     initialized_provider._config = {"prefetch_enabled": False}
     assert initialized_provider.prefetch(query="x") == ""
-    assert initialized_provider.system_prompt_block() == ""
+    block = initialized_provider.system_prompt_block()
+    assert "📚 —" in block
+    assert "📖 Recalled memories" not in block
 
 
 def test_provider_prefetch_returns_empty_when_unavailable(

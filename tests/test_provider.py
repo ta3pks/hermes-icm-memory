@@ -360,3 +360,70 @@ def test_save_config_returns_error_dict_on_oserror(
 
     # Sanity: real_mkdir is used so no global state leaks beyond monkeypatch.
     assert real_mkdir is not _raise_on_write
+
+
+# ---------- v0.4.2: user-visible indicator footer ----------------------------
+#
+# Verifies the directive that ``system_prompt_block`` appends to ask the LLM
+# to copy a per-turn liveness footer (📚 N · 💾 topic) to its reply. Plain-
+# function tests cover render shapes; one integration test confirms the
+# directive is wired into ``system_prompt_block`` end-to-end and that
+# ``recent_recall_count`` is reset after the read.
+
+
+def test_indicator_directive_heartbeat_when_silent() -> None:
+    """Both counters empty → minimal heartbeat (📚 —) so user sees liveness."""
+    out = IcmMemoryProvider._render_indicator_directive(0, None)
+    assert "📚 —" in out
+    assert "💾" not in out
+
+
+def test_indicator_directive_recall_only() -> None:
+    """recall > 0, no save → footer shows count only."""
+    out = IcmMemoryProvider._render_indicator_directive(3, None)
+    assert "📚 3" in out
+    assert "💾" not in out
+
+
+def test_indicator_directive_save_only() -> None:
+    """recall == 0, save present → footer shows save only (no zero-count noise)."""
+    out = IcmMemoryProvider._render_indicator_directive(0, "errors-resolved-moon-backend")
+    assert "💾 errors-resolved-moon-backend" in out
+    assert "📚" not in out
+
+
+def test_indicator_directive_both_with_separator() -> None:
+    """Both halves present → joined with the dot separator."""
+    out = IcmMemoryProvider._render_indicator_directive(2, "decisions-hermes")
+    assert "📚 2 · 💾 decisions-hermes" in out
+
+
+def test_indicator_directive_instructs_verbatim_echo() -> None:
+    """Directive text must tell the LLM to copy literally; that's how the
+    user-visible indicator lands in the reply without a new Hermes hook."""
+    out = IcmMemoryProvider._render_indicator_directive(1, "context-hermes-chat")
+    assert "VERBATIM" in out
+    assert "end of your reply" in out.lower()
+
+
+def test_system_prompt_block_appends_indicator_and_resets_recall_count() -> None:
+    """End-to-end: directive lands in block; recall counter resets after read.
+
+    save_topic is sourced from the LAST entry of ``recent_stores`` (which the
+    same call drains), so the second call should heartbeat — both halves clean.
+    """
+    provider = IcmMemoryProvider()
+    provider._worker_state.recent_recall_count = 4
+    provider._worker_state.recent_stores.append(
+        ("learnings-hermes-icm-memory", "queue worker dies on second OOM"),
+    )
+
+    block = provider.system_prompt_block()
+    assert "📚 4 · 💾 learnings-hermes-icm-memory" in block
+    # Drained the stores list and zeroed the recall count.
+    assert provider._worker_state.recent_stores == []
+    assert provider._worker_state.recent_recall_count == 0
+
+    # Next turn with no new state → heartbeat only.
+    second = provider.system_prompt_block()
+    assert "📚 —" in second

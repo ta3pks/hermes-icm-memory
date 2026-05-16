@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] — 2026-05-17
+
+**User-visible per-turn indicator + corpus-aligned scoped topics.**
+
+### Added
+
+- **`system_prompt_block` indicator footer (📚 N · 💾 topic).** The block
+  now appends a directive telling the LLM to copy a literal liveness
+  footer to the end of its reply, so the user sees evidence the memory
+  plugin actually ran each turn. Heartbeat (`📚 —`) is emitted on
+  silent turns so the indicator is never missing. Fed by a new
+  `WorkerState.recent_recall_count` (set in `provider.prefetch`) and the
+  existing `recent_stores` buffer (now populated by both the classifier
+  worker and the regex `submit_triggers` path). No new Hermes hook
+  registration needed — uses the existing `system_prompt_block` channel.
+- **`gotchas-{project}` category** in `mapping.MAPPING` to match the
+  corpus convention (`gotchas-pi-hole`, `gotchas-claude-code`, etc.).
+  Classifier prompt also lists `gotchas` as a valid category.
+- **`ClassifierResult.project` field** — the LLM is asked to suggest a
+  project slug; the classifier worker passes it through
+  `mapping._resolve_topic` so async-classified writes land in the same
+  scoped buckets as regex-detected writes.
+
+### Changed
+
+- **`errors-resolved` and `learnings` topic templates are now
+  project-scoped** (`errors-resolved-{project}`, `learnings-{project}`)
+  to match the ICM corpus convention (`errors-resolved-hermes`,
+  `learnings-bmad`, etc.) instead of dumping every cross-project write
+  into one overcrowded bucket. `preferences` intentionally stays
+  unscoped — the corpus treats it as one global bucket.
+- **`mapping._DEFAULT_PROJECT`** changed from `"default"` to
+  `"hermes-chat"` so unscoped saves land in a greppable bucket
+  (`errors-resolved-hermes-chat`) rather than `errors-resolved-default`.
+- **`hooks._submit_periodic_context`** now resolves the periodic-context
+  topic via `mapping._resolve_topic` instead of duplicating the literal
+  `"default"` fallback that drifted from `_DEFAULT_PROJECT`.
+
 ## [0.4.1] — 2026-05-16
 
 **Bug fix — auto-store no longer silently dropped in default-shared mode.**

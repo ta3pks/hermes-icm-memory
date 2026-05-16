@@ -24,6 +24,11 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 #: System prompt sent to the classifier LLM. Instructs JSON-only output.
+#: v0.4.2 — adds ``gotchas`` category + ``project`` field. The caller (the
+#: hooks._classifier_worker) feeds the bare ``topic`` category plus the
+#: ``project`` through ``mapping._resolve_topic`` so the final ICM topic
+#: lands as e.g. ``errors-resolved-moon-backend`` instead of a single
+#: overcrowded ``errors-resolved`` bucket.
 _SYSTEM_PROMPT: str = """\
 You are a memory classifier. Given a conversation exchange, determine if \
 there is anything worth remembering long-term.
@@ -33,17 +38,26 @@ An exchange is worth remembering when it contains:
 - A resolved error or root cause ("the bug was the port was already in use")
 - A decision ("we decided to use FastAPI")
 - A learning or insight ("turns out the Pi doesn't have enough RAM")
+- A gotcha or surprising behaviour worth warning future-self about
+  ("watch out — psql -c silently swallows errors without -v ON_ERROR_STOP=1")
 
 Respond with a JSON object. If nothing worth storing:
 {{"store": null, "reason": "<brief reason>"}}
 
 If something worth storing:
-{{"store": {{"topic": "<topic>", "importance": "<importance>",
-       "content": "<short summary>", "keywords": ["kw1", "kw2"]}}}}
+{{"store": {{"topic": "<category>", "project": "<project>",
+       "importance": "<importance>", "content": "<short summary>",
+       "keywords": ["kw1", "kw2"]}}}}
 
-Topic must be one of: preferences, decisions, errors-resolved, learnings, context
-Importance must be one of: critical, high, medium, low
-Content should be concise (max 200 chars)."""
+``topic`` MUST be one of: preferences, decisions, errors-resolved, \
+learnings, context, gotchas
+``project`` is a short kebab-case slug naming the codebase / domain / \
+system the exchange is about (e.g. ``moon-backend``, ``hermes``, \
+``pi-hole``, ``askinminder``). If you genuinely cannot tell, return the \
+literal string ``hermes-chat`` — never invent a vague project like \
+``general`` or ``misc``.
+``importance`` MUST be one of: critical, high, medium, low
+``content`` should be concise (max 200 chars)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,12 +74,22 @@ class ClassifyTask:
 
 @dataclass(frozen=True, slots=True)
 class ClassifierResult:
-    """Parsed output from the classifier LLM."""
+    """Parsed output from the classifier LLM.
+
+    ``topic`` is the bare category (``errors-resolved``, ``decisions``, etc.) —
+    the caller must run it through :func:`mapping._resolve_topic` together with
+    ``project`` to produce the final scoped topic written to ICM.
+    """
 
     topic: str
     importance: str
     content: str
     keywords: tuple[str, ...] = field(default_factory=tuple)
+    #: v0.4.2 — project slug inferred by the LLM; falls back to ``hermes-chat``
+    #: when the LLM omits the field or returns an empty value. Threaded into
+    #: :func:`mapping._resolve_topic` so the final topic matches the corpus
+    #: convention (``errors-resolved-{project}`` etc.).
+    project: str | None = None
 
 
 def classify_exchange(
@@ -204,10 +228,13 @@ def classify_exchange(
     importance = store.get("importance", "medium")
     content = store.get("content", "")
     keywords = tuple(store.get("keywords", []))
+    raw_project = store.get("project")
+    project = raw_project.strip() if isinstance(raw_project, str) and raw_project.strip() else None
 
     return ClassifierResult(
         topic=topic,
         importance=importance,
         content=content[:500],  # cap content length
         keywords=keywords[:5],  # cap keywords
+        project=project,
     )

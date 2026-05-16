@@ -20,15 +20,25 @@ from typing import Final
 Trigger = tuple[str, str, str, list[str]]
 
 #: FR16 topic ↔ importance matrix. Frozen public surface (NFR-MAINT-1).
+#: v0.4.2 — every project-scoped category uses ``{project}`` so writes land in
+#: topics like ``errors-resolved-hermes-chat`` instead of a single overcrowded
+#: ``errors-resolved`` bucket (matches the convention already established in
+#: the user's ICM corpus: ``errors-resolved-hermes``, ``learnings-bmad``,
+#: ``gotchas-pi-hole``, etc.). ``preferences`` intentionally stays unscoped
+#: because the corpus treats it as one global bucket.
 MAPPING: Final[dict[str, dict[str, str]]] = {
     "decisions": {"topic_template": "decisions-{project}", "importance": "high"},
-    "errors-resolved": {"topic_template": "errors-resolved", "importance": "high"},
+    "errors-resolved": {"topic_template": "errors-resolved-{project}", "importance": "high"},
     "preferences": {"topic_template": "preferences", "importance": "critical"},
     "context": {"topic_template": "context-{project}", "importance": "high"},
-    "learnings": {"topic_template": "learnings", "importance": "high"},
+    "learnings": {"topic_template": "learnings-{project}", "importance": "high"},
+    "gotchas": {"topic_template": "gotchas-{project}", "importance": "high"},
 }
 
-_DEFAULT_PROJECT: Final[str] = "default"
+#: Default scope when no project is inferred. Chosen over the previous
+#: ``"default"`` so unscoped saves land in a meaningful, greppable bucket
+#: (``errors-resolved-hermes-chat``) rather than ``errors-resolved-default``.
+_DEFAULT_PROJECT: Final[str] = "hermes-chat"
 _CONTENT_LIMIT: Final[int] = 500
 _KEYWORDS_LIMIT: Final[int] = 5
 

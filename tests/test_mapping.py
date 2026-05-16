@@ -13,25 +13,32 @@ from __future__ import annotations
 from hermes_icm_memory import mapping
 
 
-def test_mapping_dict_has_five_categories() -> None:
-    """MAPPING locks the five FR16 categories — no more, no less."""
+def test_mapping_dict_has_expected_categories() -> None:
+    """MAPPING locks the v0.4.2 category set — five original + gotchas."""
     assert set(mapping.MAPPING.keys()) == {
         "decisions",
         "errors-resolved",
         "preferences",
         "context",
         "learnings",
+        "gotchas",
     }
 
 
 def test_mapping_topic_and_importance_for_each_category() -> None:
-    """Each category maps to the FR16-locked (topic_template, importance) pair."""
+    """Each category maps to the v0.4.2 (topic_template, importance) pair.
+
+    v0.4.2: errors-resolved and learnings became project-scoped to match the
+    existing ICM corpus convention (errors-resolved-hermes, learnings-bmad,
+    etc.). preferences stays unscoped — the corpus treats it as one bucket.
+    """
     expected: dict[str, tuple[str, str]] = {
         "decisions": ("decisions-{project}", "high"),
-        "errors-resolved": ("errors-resolved", "high"),
+        "errors-resolved": ("errors-resolved-{project}", "high"),
         "preferences": ("preferences", "critical"),
         "context": ("context-{project}", "high"),
-        "learnings": ("learnings", "high"),
+        "learnings": ("learnings-{project}", "high"),
+        "gotchas": ("gotchas-{project}", "high"),
     }
     for category, (topic_template, importance) in expected.items():
         entry = mapping.MAPPING[category]
@@ -51,10 +58,10 @@ def test_detect_errors_resolved_pattern() -> None:
         assistant_text="Fixed the import error - root cause was the missing __init__.py.",
         project="hermes-icm-memory",
     )
-    matched = [t for t in triggers if t[0] == "errors-resolved"]
+    matched = [t for t in triggers if t[0].startswith("errors-resolved-")]
     assert len(matched) == 1, f"expected exactly one errors-resolved trigger, got {triggers!r}"
     topic, importance, content, keywords = matched[0]
-    assert topic == "errors-resolved"
+    assert topic == "errors-resolved-hermes-icm-memory"
     assert importance == "high"
     assert isinstance(content, str) and content
     assert isinstance(keywords, list)
@@ -140,13 +147,13 @@ def test_detect_multiple_triggers_in_one_turn() -> None:
         project="hermes-icm-memory",
     )
     topics = {t[0] for t in triggers}
-    assert "errors-resolved" in topics
+    assert "errors-resolved-hermes-icm-memory" in topics
     assert "decisions-hermes-icm-memory" in topics
-    assert "learnings" in topics
+    assert "learnings-hermes-icm-memory" in topics
 
 
 def test_topic_template_with_default_project() -> None:
-    """project=None substitutes 'default' into project-templated topics."""
+    """project=None substitutes the v0.4.2 default 'hermes-chat' into templates."""
     # Decisions trigger with project=None.
     decisions = mapping.detect_triggers(
         user_text="",
@@ -154,8 +161,8 @@ def test_topic_template_with_default_project() -> None:
         project=None,
     )
     decision_topics = [t[0] for t in decisions if t[0].startswith("decisions-")]
-    assert decision_topics == ["decisions-default"], (
-        f"expected ['decisions-default'], got {decision_topics!r}"
+    assert decision_topics == ["decisions-hermes-chat"], (
+        f"expected ['decisions-hermes-chat'], got {decision_topics!r}"
     )
 
     # Periodic context with project=None.
@@ -167,8 +174,8 @@ def test_topic_template_with_default_project() -> None:
         every_n_turns=20,
     )
     context_topics = [t[0] for t in context if t[0].startswith("context-")]
-    assert context_topics == ["context-default"], (
-        f"expected ['context-default'], got {context_topics!r}"
+    assert context_topics == ["context-hermes-chat"], (
+        f"expected ['context-hermes-chat'], got {context_topics!r}"
     )
 
     # And the literal '{project}' must never appear in any emitted topic.
