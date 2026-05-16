@@ -40,6 +40,13 @@ logger = logging.getLogger(__name__)
 #: Filename of the JSON sidecar persisted under ``<hermes_home>/icm/``.
 _CONFIG_SIDECAR_NAME: Final[str] = "config.json"
 
+#: Manifest name (from ``plugin.yaml``). Hermes stores per-plugin config under
+#: ``plugins.<this-key>.*`` in the hermes_home ``config.yaml``; v0.4.5
+#: ``_load_hermes_plugin_config`` reads that section at initialize time so
+#: operator-set keys like ``use_embeddings: false`` actually take effect
+#: instead of being silently overridden by the schema default.
+_PLUGIN_MANIFEST_NAME: Final[str] = "hermes-icm-memory"
+
 #: Frozen architecture §10.1 defaults, materialised once. Avoids the per-call
 #: deep-copy in :meth:`IcmMemoryProvider._cfg` (otherwise ``sync_turn`` would
 #: pay an O(N) copy of the schema list every turn).
@@ -229,6 +236,11 @@ class IcmMemoryProvider:
             self._init_args = args_key
             self._hermes_home = Path(hermes_home)
             self._hermes_config = self._read_hermes_config()
+            # v0.4.5 — merge operator-set keys from plugins.<name>.* in
+            # config.yaml so settings like ``use_embeddings: false`` actually
+            # take effect on this instance (pre-v0.4.5 they were silently
+            # ignored — see _load_hermes_plugin_config docstring).
+            self._load_hermes_plugin_config()
 
         # v0.4.4 — ALWAYS ensure the warm MCP daemon is up, even on the
         # idempotent re-init path. Pre-v0.4.4 this call lived inside the
@@ -382,6 +394,46 @@ class IcmMemoryProvider:
                 extra={"path": str(config_path), "err": repr(exc)},
             )
             return {}
+
+    def _load_hermes_plugin_config(self) -> None:
+        """Merge ``plugins.hermes-icm-memory.*`` from Hermes config.yaml into
+        ``self._config`` (v0.4.5).
+
+        Pre-v0.4.5 the plugin only consulted operator-set values via
+        :meth:`save_config` (which writes a JSON sidecar but is never auto-
+        called by Hermes on plugin load). Result: an operator who put
+        ``plugins.hermes-icm-memory.use_embeddings: false`` in their
+        config.yaml saw their setting silently ignored — the plugin always
+        used the schema default ``True`` and spawned ``icm serve`` without
+        ``--no-embeddings``, breaking recall quality on Pi-class hosts
+        (where the multilingual-e5-base ONNX model can't realistically be
+        loaded). This helper closes that gap.
+
+        Behaviour:
+
+        - Reads :attr:`self._hermes_config['plugins'][<manifest-name>]`.
+        - Filters to keys that exist in the schema (silently drops typos /
+          unknown keys to keep the boundary tight).
+        - In-place ``self._config.update(...)``; subsequent
+          :meth:`save_config` calls keep working as before and override.
+        - Tolerant of missing / malformed sections — returns silently and
+          relies on schema defaults.
+        """
+        if not isinstance(self._hermes_config, dict):
+            return
+        plugins_section = self._hermes_config.get("plugins")
+        if not isinstance(plugins_section, dict):
+            return
+        my_section = plugins_section.get(_PLUGIN_MANIFEST_NAME)
+        if not isinstance(my_section, dict):
+            return
+        merged = {k: v for k, v in my_section.items() if k in _DEFAULT_CONFIG}
+        if merged:
+            self._config.update(merged)
+            logger.info(
+                "config: loaded %d key(s) from plugins.%s.* in hermes config.yaml: %s",
+                len(merged), _PLUGIN_MANIFEST_NAME, sorted(merged.keys()),
+            )
 
     def _resolve_classifier_config(self) -> dict[str, str] | None:
         """Resolve classifier endpoint, model, and API key from Hermes config.

@@ -617,6 +617,65 @@ def test_shutdown_does_not_kill_shared_mcp_daemon(
     )
 
 
+def test_initialize_loads_plugin_config_from_hermes_yaml(
+    tmp_hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: pre-v0.4.5 the plugin never read ``plugins.hermes-icm-
+    memory.*`` from ``config.yaml``, so operator settings like
+    ``use_embeddings: false`` were silently overridden by the schema
+    default ``True`` — which on Pi-class hosts spawned ``icm serve``
+    without ``--no-embeddings`` and broke recall quality. v0.4.5 merges
+    that section into ``self._config`` at initialize so the operator
+    setting actually takes effect.
+    """
+    from hermes_icm_memory import cli_runner as _cr
+
+    # Don't actually try to spawn icm; we're only testing config plumbing.
+    monkeypatch.setattr(_cr, "mcp_start", lambda **_kw: None)
+
+    # Operator config that v0.4.5 should pick up.
+    (tmp_hermes_home / "config.yaml").write_text(
+        "plugins:\n"
+        "  hermes-icm-memory:\n"
+        "    use_embeddings: false\n"
+        "    recall_limit: 7\n"
+        "    not_in_schema: ignored\n",
+        encoding="utf-8",
+    )
+    provider = IcmMemoryProvider()
+    provider.initialize(
+        session_id="s1", hermes_home=tmp_hermes_home, profile="default",
+    )
+    assert provider._config_bool("use_embeddings") is False, (
+        "operator-set use_embeddings: false must beat the schema default True"
+    )
+    assert provider._config_int("recall_limit") == 7
+    # Unknown keys must be filtered (forward-compat / typo guard).
+    assert "not_in_schema" not in provider._config
+
+
+def test_load_plugin_config_no_op_on_missing_section(
+    tmp_hermes_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty / missing plugin section is silently tolerated; schema defaults
+    remain in effect — no crash on operators who haven't set anything."""
+    from hermes_icm_memory import cli_runner as _cr
+
+    monkeypatch.setattr(_cr, "mcp_start", lambda **_kw: None)
+
+    (tmp_hermes_home / "config.yaml").write_text(
+        "plugins:\n  enabled: []\n", encoding="utf-8",
+    )
+    provider = IcmMemoryProvider()
+    provider.initialize(
+        session_id="s1", hermes_home=tmp_hermes_home, profile="default",
+    )
+    # Falls back to the schema default — and the call did not raise.
+    assert provider._config_bool("use_embeddings") is True
+
+
 def test_initialize_idempotent_path_still_revalidates_mcp_client(
     tmp_hermes_home: Path,
     monkeypatch: pytest.MonkeyPatch,

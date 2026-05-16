@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.5] — 2026-05-17
+
+**Bug fix — operator config under `plugins.hermes-icm-memory.*` in
+`config.yaml` was silently ignored.**
+
+### Symptom
+
+Pi operators set `plugins.hermes-icm-memory.use_embeddings: false` in
+`config.yaml` (per the documented "never embed on Pi" rule) but the
+plugin still spawned `icm serve` without `--no-embeddings`, and the
+warm daemon was reported with `use_embeddings=True` in the v0.4.4
+`mcp_start` INFO log. Recall quality suffered as a consequence (the
+multilingual-e5-base ONNX model isn't realistic on a Pi 4).
+
+### Root cause
+
+The plugin's `IcmMemoryProvider.__init__` initialised `self._config`
+as `{}` and only ever populated it via `save_config()` — but Hermes
+never auto-calls `save_config` on plugin load. So every `_config_bool`
+lookup fell through to the schema default. The
+`plugins.hermes-icm-memory.*` section of `config.yaml` was read
+nowhere.
+
+### Fixed
+
+- **`IcmMemoryProvider._load_hermes_plugin_config()`** — new helper
+  that reads `plugins.<manifest-name>.*` from the parsed Hermes
+  `config.yaml`, filters to keys present in the schema (forward-compat
+  / typo guard), and merges into `self._config`. Called from
+  `initialize()` immediately after `_read_hermes_config()`.
+- INFO log on load reports which keys were merged so operators can
+  confirm their settings took effect:
+  `config: loaded 4 key(s) from plugins.hermes-icm-memory.* in hermes
+  config.yaml: ['classifier_enabled', 'isolated', 'recall_limit',
+  'use_embeddings']`.
+
+Regression guards in `tests/test_provider.py`:
+- `test_initialize_loads_plugin_config_from_hermes_yaml`
+- `test_load_plugin_config_no_op_on_missing_section`
+
 ## [0.4.4] — 2026-05-17
 
 **Bug fix — recall stopped working mid-session after a sub-agent
