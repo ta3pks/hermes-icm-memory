@@ -28,13 +28,24 @@ from hermes_icm_memory.provider import IcmMemoryProvider
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Hooks declared in plugin.yaml — must be bound as callables on the
-# registered provider per AC2 (and Hermes contract).
+# Memory-provider hooks declared in plugin.yaml — must be bound as callables
+# on the registered IcmMemoryProvider per AC2 (and Hermes contract).
+#
+# v0.4.3 introduced a NEW hook ``transform_llm_output`` that is NOT bound on
+# the provider class — it's a module-level callable registered via
+# ``ctx.register_hook`` in the standalone-plugin path. Kept out of this tuple
+# on purpose; covered separately by ``test_transform_llm_output_in_manifest``.
 _PLUGIN_YAML_HOOKS: tuple[str, ...] = (
     "prefetch",
     "system_prompt_block",
     "sync_turn",
     "on_session_end",
+)
+
+# Full set of hooks declared in plugin.yaml (includes the module-level
+# transform_llm_output). Used by the manifest-shape test.
+_PLUGIN_YAML_HOOKS_ALL: tuple[str, ...] = _PLUGIN_YAML_HOOKS + (
+    "transform_llm_output",
 )
 
 
@@ -68,7 +79,21 @@ def test_plugin_yaml_shape() -> None:
         assert key in manifest, f"plugin.yaml missing required key: {key}"
     assert manifest["name"] == "hermes-icm-memory"
     assert manifest["version"] == hermes_icm_memory.__version__
-    assert set(manifest["hooks"]) == set(_PLUGIN_YAML_HOOKS)
+    assert set(manifest["hooks"]) == set(_PLUGIN_YAML_HOOKS_ALL)
+
+
+def test_transform_llm_output_in_manifest() -> None:
+    """v0.4.3 — manifest must declare transform_llm_output so Hermes' general
+    PluginManager registers it (the directive-only fallback path is not
+    enough — the user-visible footer needs the programmatic hook)."""
+    manifest = yaml.safe_load((REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
+    assert "transform_llm_output" in manifest["hooks"]
+    # And the manifest must set kind=standalone, otherwise the general
+    # PluginManager auto-coerces memory-provider plugins to kind=exclusive
+    # and skips loading us (so register_hook never fires).
+    assert manifest.get("kind") == "standalone", (
+        "plugin.yaml must explicitly set kind: standalone — see v0.4.3 comment"
+    )
 
 
 # ---------------------------------------------------------------- S10 wiring

@@ -5,6 +5,60 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] — 2026-05-17
+
+**Programmatic indicator footer — append the `📚 N · 💾 topic` line via
+`transform_llm_output` so it appears regardless of LLM compliance.**
+
+### Why
+
+v0.4.2 shipped the indicator as a directive inside `system_prompt_block`
+asking the LLM to copy a footer verbatim. The smaller models in
+rotation (e.g. `big-pickle` via opencode-zen) silently ignored it — the
+user-visible footer never appeared. v0.4.3 makes the append
+programmatic via the `transform_llm_output` plugin hook; the directive
+remains as a fallback for code paths the hook can't reach.
+
+### Added
+
+- **`transform_llm_output` plugin hook.** Module-level
+  `_do_indicator_transform(response_text, ...)` reads the captured
+  per-turn state and appends the footer to the LLM's reply before
+  Hermes ships it to the user. Detects when the LLM already complied
+  with the fallback directive (response ends with the same footer) and
+  skips to avoid double-appending.
+- **Module-level `provider._INDICATOR_STATE` dict.** Source of truth for
+  the per-turn recall count + last save topic. Module-level on purpose
+  — under `kind=standalone` dual-load there are TWO `IcmMemoryProvider`
+  instances in the gateway process (one owned by `memory_manager`, one
+  by the general `PluginManager`), and the transform hook fires on the
+  PluginManager one while prefetch/sync_turn fire on the memory_manager
+  one. Module-level state bridges them.
+- **Producer helpers `_capture_recall_count` / `_capture_save_topic`.**
+  Called from `provider.prefetch` and `hooks.submit_triggers` /
+  `hooks._classifier_worker` respectively.
+
+### Changed
+
+- **`plugin.yaml`: `kind: standalone` set explicitly + `transform_llm_output`
+  added to the hooks list.** Without `kind: standalone` the manifest
+  auto-coerces to `exclusive` (because the plugin registers a memory
+  provider), which causes `hermes_cli.plugins.PluginManager` to skip
+  loading the plugin entirely — and the memory-manager loading path
+  uses a `_ProviderCollector` ctx whose `register_hook` is a no-op.
+  Standalone unblocks `register_hook`.
+- **`register(ctx)` made defensive.** Uses `hasattr` to detect which ctx
+  surface is available, so the same function works for both loaders
+  without raising on either:
+  - `PluginContext` (general PluginManager) — has `register_hook`, no
+    `register_memory_provider`.
+  - `_ProviderCollector` (memory_manager) — has
+    `register_memory_provider`, `register_hook` is a no-op.
+- **`system_prompt_block` directive language strengthened.** Uppercased
+  "MANDATORY OUTPUT FORMAT" framing with explicit non-negotiable wording.
+  Kept as belt-and-suspenders fallback when the hook can't reach
+  (streamed partials, etc.).
+
 ## [0.4.2] — 2026-05-17
 
 **User-visible per-turn indicator + corpus-aligned scoped topics.**

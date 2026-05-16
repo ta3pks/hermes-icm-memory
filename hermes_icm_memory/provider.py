@@ -48,6 +48,77 @@ _DEFAULT_CONFIG: Final[dict[str, Any]] = {
 }
 
 
+# ---------------------------------------------------------------- v0.4.3 indicator
+#
+# Module-level shared state for the user-visible per-turn indicator footer
+# (``📚 N · 💾 topic``). Module-level (not instance-level) because under the
+# v0.4.3 dual-load arrangement (kind=standalone) there are two
+# ``IcmMemoryProvider`` instances in the gateway process — one owned by
+# ``memory_manager`` (receives prefetch/sync_turn), one owned by the general
+# ``PluginManager`` (whose ``transform_llm_output`` hook is the one that
+# actually fires per turn). They share this one dict so a recall captured by
+# the memory_manager instance lands in the footer appended by the
+# PluginManager instance.
+
+_INDICATOR_STATE: dict[str, Any] = {
+    "recall_count": 0,
+    "last_save_topic": None,
+}
+
+
+def _capture_recall_count(count: int) -> None:
+    """Producer hook called by ``IcmMemoryProvider.prefetch`` after run_recall."""
+    _INDICATOR_STATE["recall_count"] = count
+
+
+def _capture_save_topic(topic: str) -> None:
+    """Producer hook called by ``hooks.submit_triggers`` / classifier worker."""
+    if topic:
+        _INDICATOR_STATE["last_save_topic"] = topic
+
+
+def _render_indicator_footer(recall: int, save: str | None) -> str:
+    """Build the literal footer line the user sees at the bottom of replies.
+
+    Heartbeat (``📚 —``) when both halves are empty so the user always has
+    a per-turn liveness signal — the whole point of the indicator.
+    """
+    parts: list[str] = []
+    if recall > 0:
+        parts.append(f"📚 {recall}")
+    if save:
+        parts.append(f"💾 {save}")
+    return " · ".join(parts) if parts else "📚 —"
+
+
+def _do_indicator_transform(
+    response_text: str = "",
+    **_kwargs: Any,
+) -> str | None:
+    """``transform_llm_output`` plugin-hook implementation.
+
+    Reads :data:`_INDICATOR_STATE`, appends the footer to ``response_text``,
+    and resets the state for the next turn. Returns ``None`` (leave text
+    unchanged) when the response is empty OR already ends with the same
+    footer — the latter avoids a double-append when the LLM also complied
+    with the ``system_prompt_block`` directive (belt-and-suspenders mode).
+    """
+    if not response_text:
+        return None
+    footer = _render_indicator_footer(
+        _INDICATOR_STATE.get("recall_count", 0),
+        _INDICATOR_STATE.get("last_save_topic"),
+    )
+    stripped = response_text.rstrip()
+    # Reset for the next turn regardless of which branch we take below —
+    # both branches consume the same per-turn snapshot.
+    _INDICATOR_STATE["recall_count"] = 0
+    _INDICATOR_STATE["last_save_topic"] = None
+    if stripped.endswith(footer):
+        return None  # LLM complied; leave its text alone.
+    return f"{stripped}\n\n{footer}"
+
+
 class IcmMemoryProvider:
     """Hermes ``MemoryProvider`` backed by the local ``icm`` CLI.
 
@@ -460,7 +531,14 @@ class IcmMemoryProvider:
             return ""
         # v0.4.2 — feed the system_prompt_block indicator footer with the
         # capped hit count so the user sees a `📚 N` heartbeat per turn.
-        self._worker_state.recent_recall_count = len(hits[:recall_limit])
+        # v0.4.3 — ALSO write through to the module-level _INDICATOR_STATE so
+        # the dual-loaded transform_llm_output hook can read it (the hook
+        # fires on the standalone-loaded instance, not this memory_manager
+        # one). The per-instance ``_worker_state`` write below is retained
+        # only for the fallback directive path in ``system_prompt_block``.
+        capped_count = len(hits[:recall_limit])
+        self._worker_state.recent_recall_count = capped_count
+        _capture_recall_count(capped_count)
         # Bound the cache to the latest entry. ``system_prompt_block`` only
         # reads ``_latest_prefetch_key`` (NFR-PERF-4), so older entries are
         # dead weight that would otherwise leak monotonically across the
@@ -533,15 +611,27 @@ class IcmMemoryProvider:
 
     @staticmethod
     def _render_indicator_directive(recall_count: int, save_topic: str | None) -> str:
-        """Build the literal indicator block the LLM is asked to echo verbatim."""
-        parts: list[str] = [f"📚 {recall_count}"] if recall_count > 0 else []
-        if save_topic:
-            parts.append(f"💾 {save_topic}")
-        footer = " · ".join(parts) if parts else "📚 —"
+        """Build the literal indicator block the LLM is asked to echo verbatim.
+
+        v0.4.3 — fallback path only. The primary indicator path is the
+        :func:`_do_indicator_transform` ``transform_llm_output`` hook, which
+        appends the footer programmatically and detects already-appended
+        footers (so this directive being followed doesn't cause a double).
+        Kept as belt-and-suspenders for code paths the hook can't reach
+        (e.g. streamed partial deliveries that bypass the final-response
+        transform).
+        """
+        footer = _render_indicator_footer(recall_count, save_topic)
         return (
-            "💡 ICM-INDICATOR: At the very end of your reply, on a new line, "
-            f"append this footer VERBATIM: `{footer}` — do not paraphrase, "
-            "translate, or wrap in extra formatting."
+            "════════════════════════════════════════════════════════════════\n"
+            "MANDATORY OUTPUT FORMAT — MEMORY INDICATOR FOOTER\n"
+            "════════════════════════════════════════════════════════════════\n"
+            "Your reply MUST end with the following line on its own line, "
+            "copied character-for-character (no paraphrase, no translation, "
+            "no extra formatting, no surrounding code fence):\n"
+            f"\n    {footer}\n\n"
+            "This is non-negotiable. If you omit this footer the user "
+            "loses their memory-system liveness signal."
         )
 
     # ------------------------------------------------------------------ sync_turn

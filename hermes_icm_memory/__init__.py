@@ -23,5 +23,23 @@ __all__ = ["IcmMemoryProvider", "__version__", "register"]
 
 
 def register(ctx: Any) -> None:
-    """Hermes plugin entry point. Construct the provider and hand it to ctx."""
-    ctx.register_memory_provider(IcmMemoryProvider())
+    """Hermes plugin entry point.
+
+    v0.4.3 — defensive: called by TWO loaders under ``kind=standalone``:
+
+    1. ``hermes_cli.plugins.PluginManager`` — its ``PluginContext`` has
+       ``register_hook`` but NO ``register_memory_provider``.
+    2. ``plugins.memory._load_provider_from_dir`` — its ``_ProviderCollector``
+       has ``register_memory_provider`` but ``register_hook`` is a no-op.
+
+    Both paths call us; ``hasattr`` checks let each contribute what its ctx
+    supports. The ``transform_llm_output`` hook is the primary indicator-
+    footer path (programmatic, model-independent); the directive in
+    ``system_prompt_block`` is the fallback when the hook isn't wired.
+    """
+    if hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(IcmMemoryProvider())
+    if hasattr(ctx, "register_hook"):
+        from .provider import _do_indicator_transform
+
+        ctx.register_hook("transform_llm_output", _do_indicator_transform)

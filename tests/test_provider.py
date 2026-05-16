@@ -399,11 +399,14 @@ def test_indicator_directive_both_with_separator() -> None:
 
 
 def test_indicator_directive_instructs_verbatim_echo() -> None:
-    """Directive text must tell the LLM to copy literally; that's how the
-    user-visible indicator lands in the reply without a new Hermes hook."""
+    """Directive text must instruct the LLM to copy the footer literally —
+    the directive is the v0.4.3 fallback when transform_llm_output isn't
+    wired (e.g. streamed partials). Strengthened wording adopted in v0.4.3."""
     out = IcmMemoryProvider._render_indicator_directive(1, "context-hermes-chat")
-    assert "VERBATIM" in out
-    assert "end of your reply" in out.lower()
+    # Stronger v0.4.3 wording must be present.
+    assert "MANDATORY" in out
+    assert "copied character-for-character" in out
+    assert "non-negotiable" in out
 
 
 def test_system_prompt_block_appends_indicator_and_resets_recall_count() -> None:
@@ -427,3 +430,154 @@ def test_system_prompt_block_appends_indicator_and_resets_recall_count() -> None
     # Next turn with no new state → heartbeat only.
     second = provider.system_prompt_block()
     assert "📚 —" in second
+
+
+# ---------- v0.4.3: transform_llm_output hook (programmatic indicator) -------
+#
+# The hook is the primary indicator path — appends the footer to the LLM's
+# reply regardless of whether the model honoured the system_prompt_block
+# directive. Module-level _INDICATOR_STATE is shared across the two
+# IcmMemoryProvider instances created under kind=standalone dual-load.
+
+
+@pytest.fixture
+def reset_indicator_state() -> Any:
+    """Snapshot + zero + restore module-level _INDICATOR_STATE so tests don't
+    bleed state into each other (it lives at module level on purpose — see
+    v0.4.3 comment in provider.py). Zeroes BEFORE the test so the test sees a
+    clean baseline even when prior tests in the same session left residue."""
+    from hermes_icm_memory import provider as _prov
+    snapshot = dict(_prov._INDICATOR_STATE)
+    _prov._INDICATOR_STATE.clear()
+    _prov._INDICATOR_STATE.update({"recall_count": 0, "last_save_topic": None})
+    yield
+    _prov._INDICATOR_STATE.clear()
+    _prov._INDICATOR_STATE.update(snapshot)
+
+
+def test_indicator_transform_appends_footer(reset_indicator_state: None) -> None:  # noqa: ARG001
+    """Hook appends `📚 N · 💾 topic` to a reply that doesn't already have it."""
+    from hermes_icm_memory import provider as _prov
+
+    _prov._capture_recall_count(2)
+    _prov._capture_save_topic("decisions-hermes")
+
+    out = _prov._do_indicator_transform(response_text="Here is my answer.")
+    assert out is not None
+    assert out.endswith("📚 2 · 💾 decisions-hermes")
+    assert out.startswith("Here is my answer.")
+
+
+def test_indicator_transform_heartbeat_when_silent(reset_indicator_state: None) -> None:  # noqa: ARG001
+    """No captured recall/save → heartbeat footer (📚 —) still appended."""
+    from hermes_icm_memory import provider as _prov
+
+    out = _prov._do_indicator_transform(response_text="ok")
+    assert out is not None
+    assert out.endswith("📚 —")
+
+
+def test_indicator_transform_skips_when_model_already_complied(
+    reset_indicator_state: None,  # noqa: ARG001
+) -> None:
+    """LLM followed the fallback directive → return None so we don't double."""
+    from hermes_icm_memory import provider as _prov
+
+    _prov._capture_recall_count(3)
+    response = "Here is my answer.\n\n📚 3"
+    out = _prov._do_indicator_transform(response_text=response)
+    assert out is None, "must return None when response already ends with the footer"
+
+
+def test_indicator_transform_returns_none_on_empty_text(
+    reset_indicator_state: None,  # noqa: ARG001
+) -> None:
+    """Empty response → leave it alone (don't manufacture a footer-only reply)."""
+    from hermes_icm_memory import provider as _prov
+
+    assert _prov._do_indicator_transform(response_text="") is None
+
+
+def test_indicator_transform_resets_state_after_consume(
+    reset_indicator_state: None,  # noqa: ARG001
+) -> None:
+    """State drains to 0 / None after a transform so the next turn starts clean."""
+    from hermes_icm_memory import provider as _prov
+
+    _prov._capture_recall_count(5)
+    _prov._capture_save_topic("learnings-foo")
+    _prov._do_indicator_transform(response_text="reply")
+    assert _prov._INDICATOR_STATE["recall_count"] == 0
+    assert _prov._INDICATOR_STATE["last_save_topic"] is None
+
+
+def test_capture_save_topic_ignores_empty_topic(
+    reset_indicator_state: None,  # noqa: ARG001
+) -> None:
+    """Defensive: an empty/None topic must not clobber a valid prior capture."""
+    from hermes_icm_memory import provider as _prov
+
+    _prov._capture_save_topic("preferences")
+    _prov._capture_save_topic("")  # ignored
+    assert _prov._INDICATOR_STATE["last_save_topic"] == "preferences"
+
+
+# ---------- v0.4.3: defensive register() under dual-load ---------------------
+
+
+class _FakeMemoryCtx:
+    """Mimics memory_manager._ProviderCollector — has register_memory_provider,
+    register_hook is a no-op."""
+
+    def __init__(self) -> None:
+        self.provider = None
+        self.hook_calls: list[tuple[str, Any]] = []
+
+    def register_memory_provider(self, provider: Any) -> None:
+        self.provider = provider
+
+    def register_hook(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
+        pass  # no-op like the real _ProviderCollector
+
+
+class _FakePluginCtx:
+    """Mimics hermes_cli.plugins.PluginContext — has register_hook but NO
+    register_memory_provider."""
+
+    def __init__(self) -> None:
+        self.hook_calls: list[tuple[str, Any]] = []
+
+    def register_hook(self, hook_name: str, callback: Any) -> None:
+        self.hook_calls.append((hook_name, callback))
+
+
+def test_register_with_memory_manager_ctx_creates_provider_skips_hook() -> None:
+    """memory_manager path: register_memory_provider called, register_hook no-op."""
+    from hermes_icm_memory import register
+
+    ctx = _FakeMemoryCtx()
+    register(ctx)
+    assert isinstance(ctx.provider, IcmMemoryProvider)
+
+
+def test_register_with_plugin_manager_ctx_wires_hook_skips_provider() -> None:
+    """PluginManager path: no register_memory_provider, so we only wire the hook."""
+    from hermes_icm_memory import register
+    from hermes_icm_memory.provider import _do_indicator_transform
+
+    ctx = _FakePluginCtx()
+    register(ctx)
+    assert len(ctx.hook_calls) == 1
+    hook_name, callback = ctx.hook_calls[0]
+    assert hook_name == "transform_llm_output"
+    assert callback is _do_indicator_transform
+
+
+def test_register_tolerates_minimal_ctx() -> None:
+    """ctx with neither method → no error (defensive hasattr checks)."""
+    from hermes_icm_memory import register
+
+    class _Empty:
+        pass
+
+    register(_Empty())  # must not raise

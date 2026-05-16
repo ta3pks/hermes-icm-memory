@@ -1,9 +1,19 @@
 name: hermes-icm-memory
-version: 0.4.2
+version: 0.4.3
 description: "Hermes Agent memory provider plugin backed by ICM (Infinite Context Memory) — semantic, cross-session, cross-editor recall via the local icm CLI."
 author: nikos efthias
+# v0.4.3 — explicit kind=standalone so the general PluginManager loads us
+# AND honors our register_hook("transform_llm_output", ...) call. Without
+# this, the manifest auto-coerces to kind=exclusive (because the plugin
+# registers a memory provider), which causes PluginManager to skip the
+# import entirely — leaving us with only the memory-manager loading path
+# whose _ProviderCollector ctx has register_hook as a no-op. Dual-loading
+# is fine: register() is defensive (hasattr-checked) and indicator state
+# is module-level so both instances share it.
+kind: standalone
 hooks:
   - prefetch
   - system_prompt_block
   - sync_turn
   - on_session_end
+  - transform_llm_output

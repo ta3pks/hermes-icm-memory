@@ -246,6 +246,13 @@ def classifier_loop(
             write_queue.put_nowait(write_task)
             # Track for user-facing notification (thread-safe append on CPython).
             state.recent_stores.append((scoped_topic, result.content[:120]))
+            # v0.4.3 — also publish to module-level indicator state so the
+            # transform_llm_output hook (which fires on a different
+            # IcmMemoryProvider instance under kind=standalone dual-load)
+            # can see this save when it builds the footer.
+            from . import provider as _prov
+
+            _prov._capture_save_topic(scoped_topic)
         except queue.Full:
             logger.debug(
                 "classifier: write queue full; dropping classified memory",
@@ -579,6 +586,12 @@ def submit_triggers(
             # footer). Parallels the same append in _classifier_worker so both
             # detection paths surface saves to the LLM.
             state.recent_stores.append((topic, content[:120]))
+            # v0.4.3 — also publish to module-level indicator state for the
+            # transform_llm_output hook (dual-load — see _classifier_worker
+            # comment for why).
+            from . import provider as _prov
+
+            _prov._capture_save_topic(topic)
         except queue.Full:
             _warn_overflow_once(state)
         except Exception as exc:  # defensive — never raise into the turn
