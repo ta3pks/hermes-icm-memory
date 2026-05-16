@@ -74,6 +74,10 @@ class IcmMemoryProvider:
         self._prefetch_cache: dict[int, list[dict[str, Any]]] = {}
         self._latest_prefetch_key: int | None = None
         self._worker_state: hooks.WorkerState = hooks.WorkerState()
+        # v0.4.1 — wake-up injection (P0-3): one-shot per session.
+        self._wake_up_injected: bool = False
+        # v0.4.1 — project name for topic scoping (P1-4).
+        self._project_name: str | None = None
 
     # ------------------------------------------------------------------ tool schemas
 
@@ -158,6 +162,8 @@ class IcmMemoryProvider:
         self._init_args = args_key
         self._hermes_home = Path(hermes_home)
         self._hermes_config = self._read_hermes_config()
+        # v0.4.1 P1-4: project name from config for topic scoping.
+        self._project_name = self._config_str("project_name") or profile or None
 
         # v0.4 — start the warm MCP daemon for all subsequent CLI calls.
         try:
@@ -226,13 +232,25 @@ class IcmMemoryProvider:
     # ``hermes_icm_memory.hooks`` helpers; the hooks module owns the
     # FIFO-bounded-queue + worker model (AD-15 / NFR-REL-2).
 
-    def _config_int(self, key: str) -> int:
-        """Read an int config value (caller-saved override or schema default)."""
-        return int(self._config.get(key, _DEFAULT_CONFIG[key]))
+    def _config_int(self, key: str, default: int | None = None) -> int:
+        """Read an int config value (caller-saved override or schema default).
 
-    def _config_bool(self, key: str) -> bool:
-        """Read a bool config value (caller-saved override or schema default)."""
-        return bool(self._config.get(key, _DEFAULT_CONFIG[key]))
+        v0.4.1 — Added ``default`` param for keys that may not exist in
+        ``_DEFAULT_CONFIG``.
+        """
+        if default is not None and key not in self._config and key not in _DEFAULT_CONFIG:
+            return default
+        return int(self._config.get(key, _DEFAULT_CONFIG.get(key, 0)))
+
+    def _config_bool(self, key: str, default: bool | None = None) -> bool:
+        """Read a bool config value (caller-saved override or schema default).
+
+        v0.4.1 — Added ``default`` param for keys that may not exist in
+        ``_DEFAULT_CONFIG`` (e.g. new feature flags).
+        """
+        if default is not None and key not in self._config and key not in _DEFAULT_CONFIG:
+            return default
+        return bool(self._config.get(key, _DEFAULT_CONFIG.get(key, False)))
 
     def _config_str(self, key: str) -> str:
         """Read a string-shaped config value (enum or string-typed key)."""
@@ -469,10 +487,13 @@ class IcmMemoryProvider:
     # ------------------------------------------------------------------ system_prompt_block
 
     def system_prompt_block(self, **kwargs: Any) -> str:  # noqa: ARG002
-        """Format the cached prefetch hits into a prompt-ready block.
+        """Format the cached prefetch hits + wake-up pack into a prompt-ready block.
 
         Reads the cache only — never invokes ``cli_runner`` (NFR-PERF-4).
         Disabled prefetch / empty cache → ``""``.
+
+        v0.4.1 — Added Part 3: wake-up pack injection for session-start
+        critical facts. Called on first turn only (per-session flag).
         """
         blocks: list[str] = []
 
@@ -501,6 +522,29 @@ class IcmMemoryProvider:
                     exc,
                     extra={"err": repr(exc)},
                 )
+
+        # Part 3: wake-up pack — critical/high importance memories injected on
+        # first turn of each session.  Limited to ``max_tokens`` budget.
+        # v0.4.1 (P0-3): wake_up injection closes the recall-failure gap.
+        if self._config_bool("wake_up_enabled", default=True):
+            if not self._wake_up_injected:
+                try:
+                    wake_up_text = cli_runner.run_wake_up(
+                        db_path=self._db_path,
+                        timeout_ms=self._config_int("command_timeout_read_ms"),
+                        project=self._project_name,
+                        max_tokens=self._config_int("wake_up_max_tokens", default=400),
+                    )
+                    if wake_up_text:
+                        blocks.append(wake_up_text)
+                        logger.info("wake_up: injected %d chars", len(wake_up_text))
+                except Exception as exc:  # defensive boundary (AD-07)
+                    logger.warning(
+                        "system_prompt_block: wake_up caught: %r",
+                        exc,
+                        extra={"err": repr(exc)},
+                    )
+                self._wake_up_injected = True
 
         return "\n\n".join(blocks) if blocks else ""
 
@@ -532,7 +576,7 @@ class IcmMemoryProvider:
                 self._worker_state,
                 user_content=user_content,
                 assistant_content=assistant_content,
-                project=None,
+                project=self._project_name,  # v0.4.1 P1-4: use session/project name
                 every_n_turns=self._config_int("periodic_progress_every_n_turns"),
                 classifier_enabled=classifier_enabled,
             )
@@ -550,11 +594,13 @@ class IcmMemoryProvider:
         messages: Any = None,  # noqa: ARG002 — Hermes contract may pass extra args.
         **kwargs: Any,  # noqa: ARG002
     ) -> None:
-        """Drain the queue up to ``session_end_grace_ms``; drop the rest with WARN.
+        """Drain the queue, then store a session-end summary.
 
-        Does NOT join the worker thread — daemon threads exit at interpreter
-        shutdown.
+        v0.4.1 — After draining, creates a session-summary ICM entry from
+        the accumulated ``recent_stores`` buffer.  This closes the recall
+        gap (P0-2): without it, the last session's context is lost entirely.
         """
+        # 1. Drain the write queue as before.
         try:
             hooks.drain_with_grace(
                 self._worker_state,
@@ -562,10 +608,58 @@ class IcmMemoryProvider:
             )
         except Exception as exc:  # defensive boundary
             logger.warning(
-                "on_session_end: outer boundary caught: %r",
+                "on_session_end: drain boundary caught: %r",
                 exc,
                 extra={"err": repr(exc)},
             )
+
+        # 2. Auto-summary: store a session-end context entry.
+        # v0.4.1 (P0-2) — closes the recall-failure gap.
+        if self._config_bool("session_summary_enabled", default=True):
+            try:
+                ws = self._worker_state
+                if ws and ws.recent_stores:
+                    # Build a concise summary from the accumulated stores.
+                    topics_seen = sorted({t for t, _ in ws.recent_stores})
+                    contents = "; ".join(c for _, c in ws.recent_stores[:10])
+                    summary = f"session-end context: [{', '.join(topics_seen)}] {contents}"
+                    project = self._project_name or "default"
+                    topic = f"session-{project}"
+                    cli_runner.run_store(
+                        topic=topic,
+                        content=summary,
+                        importance="high",
+                        db_path=self._db_path,
+                        timeout_ms=self._config_int("command_timeout_read_ms"),
+                        keywords=",".join(topics_seen[:5]),
+                    )
+                    logger.info(
+                        "on_session_end: stored session summary for project=%s",
+                        project,
+                    )
+            except Exception as exc:  # defensive boundary — must not raise
+                logger.warning(
+                    "on_session_end: session summary store failed: %r",
+                    exc,
+                    extra={"err": repr(exc)},
+                )
+        # Reset wake-up flag so next session gets fresh injection.
+        self._wake_up_injected = False
+
+        # 3. v0.4.1 (P2-1) — End transcript session if one was started.
+        if self._transcript_session_id:
+            try:
+                self._mcp.call_tool(
+                    "icm_transcript_record",
+                    {
+                        "session_id": self._transcript_session_id,
+                        "role": "system",
+                        "content": "[session ended]",
+                    },
+                )
+            except Exception:
+                pass  # best-effort — must not raise
+            self._transcript_session_id = None
 
     # ------------------------------------------------------------------ shutdown
 

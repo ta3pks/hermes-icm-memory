@@ -45,10 +45,12 @@ _INIT_TIMEOUT_S: float = 10.0
 _MAX_RESPONSE_LINES: int = 512
 
 #: MCP tool names exposed by icm serve (verified on icm 0.10.34).
+#: v0.4.1: Added wake-up tool for session-start injection.
 _TOOL_RECALL: str = "icm_memory_recall"
 _TOOL_STORE: str = "icm_memory_store"
 _TOOL_TOPICS: str = "icm_memory_list_topics"
 _TOOL_HEALTH: str = "icm_memory_health"
+_TOOL_WAKE_UP: str = "icm_wake_up"
 
 
 class IcmMcpClient:
@@ -249,6 +251,42 @@ class IcmMcpClient:
             )
             return {}
         return _parse_health_response(result)
+
+    def call_wake_up(
+        self,
+        project: str | None = None,
+        max_tokens: int = 400,
+    ) -> str:
+        """Call icm_wake_up via MCP. Returns formatted wake-up text.
+
+        Returns empty string if disabled or on any failure (AD-07 degrade).
+        """
+        if self._disabled:
+            return ""
+
+        params: dict[str, Any] = {"max_tokens": max_tokens}
+        if project is not None:
+            params["project"] = project
+
+        try:
+            result = self._call_tool(_TOOL_WAKE_UP, params)
+        except ICMError as exc:
+            logger.warning(
+                "mcp: wake_up failed: %r", exc, extra={"err": repr(exc)}
+            )
+            return ""
+        except Exception as exc:
+            logger.warning(
+                "mcp: wake_up unexpected error: %r",
+                exc,
+                extra={"err": repr(exc)},
+            )
+            return ""
+
+        # Wake-up returns text content (not structured like recall)
+        if result is None:
+            return ""
+        return _get_text(result) if isinstance(result, list) else ""
 
     # ------------------------------------------------------------------ private
 
