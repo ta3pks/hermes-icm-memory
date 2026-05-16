@@ -768,7 +768,6 @@ class TestIcmMcpClientCallRecall:
     def test_recall_icm_error_returns_empty(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from hermes_icm_memory.mcp_client import _TOOL_RECALL
 
         client = IcmMcpClient()
         # Make _call_tool raise ICMError by having _send_jsonrpc return error

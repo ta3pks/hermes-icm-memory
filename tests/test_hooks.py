@@ -661,7 +661,9 @@ def test_worker_loop_defensive_swallows_unexpected_exception(
 
     state.stop_event.set()
     thread.join(timeout=1.0)
-    assert "ok" in seen, f"worker should have processed at least one task after the error; seen={seen!r}"
+    assert "ok" in seen, (
+        f"worker should have processed at least one task after the error; seen={seen!r}"
+    )
     # Verify the unexpected error was logged.
     assert any("unexpected error" in r.message for r in caplog.records), (
         f"expected WARNING about unexpected error; got {[r.message for r in caplog.records]!r}"
@@ -1212,7 +1214,6 @@ def test_ensure_classifier_second_death_disables(
 
 def test_submit_classify_task_enqueues() -> None:
     """A classify task is enqueued on the classify queue."""
-    from hermes_icm_memory import classifier as cls_mod
 
     state = hooks.WorkerState()
     state.classify_queue = queue.Queue(maxsize=4)

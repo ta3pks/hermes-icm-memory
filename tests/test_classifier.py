@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import json
 import logging
+import urllib.error
+import urllib.request
 from unittest.mock import MagicMock, patch
 
 import pytest
-import urllib.error
-import urllib.request
 
 from hermes_icm_memory.classifier import (
     ClassifierResult,
@@ -71,7 +71,6 @@ def _patch_urlopen_capture(captured: list):
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         # Side-effect: capture the Request
-        original = mock_urlopen.side_effect
         mock_urlopen.side_effect = lambda req, **kw: (
             captured.append(req) or mock_urlopen.return_value
         )
@@ -362,10 +361,12 @@ class TestClassifyExchangeNetworkErrors:
             fp=None,
         )
         patch_cm, start = _patch_urlopen_error(exc)
-        with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"):
-            with patch_cm as mock_urlopen:
-                start(mock_urlopen)
-                result = classify_exchange("u", "a", **KW)
+        with (
+    caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"),
+    patch_cm as mock_urlopen,
+):
+            start(mock_urlopen)
+            result = classify_exchange("u", "a", **KW)
         assert result is None
         assert any("HTTP 503" in r.message for r in caplog.records)
 
@@ -375,10 +376,12 @@ class TestClassifyExchangeNetworkErrors:
     ) -> None:
         exc = urllib.error.URLError("connection refused")
         patch_cm, start = _patch_urlopen_error(exc)
-        with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"):
-            with patch_cm as mock_urlopen:
-                start(mock_urlopen)
-                result = classify_exchange("u", "a", **KW)
+        with (
+    caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"),
+    patch_cm as mock_urlopen,
+):
+            start(mock_urlopen)
+            result = classify_exchange("u", "a", **KW)
         assert result is None
         assert any("endpoint unreachable" in r.message for r in caplog.records)
 
@@ -388,10 +391,12 @@ class TestClassifyExchangeNetworkErrors:
     ) -> None:
         exc = TimeoutError("timed out")
         patch_cm, start = _patch_urlopen_error(exc)
-        with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"):
-            with patch_cm as mock_urlopen:
-                start(mock_urlopen)
-                result = classify_exchange("u", "a", **KW)
+        with (
+    caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"),
+    patch_cm as mock_urlopen,
+):
+            start(mock_urlopen)
+            result = classify_exchange("u", "a", **KW)
         assert result is None
         assert any("timeout after" in r.message for r in caplog.records)
 
@@ -401,10 +406,12 @@ class TestClassifyExchangeNetworkErrors:
     ) -> None:
         exc = RuntimeError("something broke unexpectedly")
         patch_cm, start = _patch_urlopen_error(exc)
-        with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"):
-            with patch_cm as mock_urlopen:
-                start(mock_urlopen)
-                result = classify_exchange("u", "a", **KW)
+        with (
+    caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"),
+    patch_cm as mock_urlopen,
+):
+            start(mock_urlopen)
+            result = classify_exchange("u", "a", **KW)
         assert result is None
         assert any("request failed" in r.message for r in caplog.records)
 
@@ -421,10 +428,12 @@ class TestClassifyExchangeResponseParsing:
     ) -> None:
         """Response body is not valid JSON."""
         patch_cm, start = _patch_urlopen("not json at all")
-        with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"):
-            with patch_cm as mock_urlopen:
-                start(mock_urlopen)
-                result = classify_exchange("u", "a", **KW)
+        with (
+    caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"),
+    patch_cm as mock_urlopen,
+):
+            start(mock_urlopen)
+            result = classify_exchange("u", "a", **KW)
         assert result is None
         assert any("unparseable response" in r.message for r in caplog.records)
 
@@ -435,10 +444,12 @@ class TestClassifyExchangeResponseParsing:
         """Response JSON contains an ``error`` key."""
         body = json.dumps({"error": "rate limited"})
         patch_cm, start = _patch_urlopen(body)
-        with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"):
-            with patch_cm as mock_urlopen:
-                start(mock_urlopen)
-                result = classify_exchange("u", "a", **KW)
+        with (
+    caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"),
+    patch_cm as mock_urlopen,
+):
+            start(mock_urlopen)
+            result = classify_exchange("u", "a", **KW)
         assert result is None
         assert any("API error" in r.message for r in caplog.records)
 
@@ -502,10 +513,12 @@ class TestClassifyExchangeLLMOutput:
         """LLM returned plain text, not JSON."""
         body = _llm_response("I don't think there's anything to remember here.")
         patch_cm, start = _patch_urlopen(body)
-        with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"):
-            with patch_cm as mock_urlopen:
-                start(mock_urlopen)
-                result = classify_exchange("u", "a", **KW)
+        with (
+    caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"),
+    patch_cm as mock_urlopen,
+):
+            start(mock_urlopen)
+            result = classify_exchange("u", "a", **KW)
         assert result is None
         assert any("LLM output not JSON" in r.message for r in caplog.records)
 
@@ -520,10 +533,12 @@ class TestClassifyExchangeLLMOutput:
         """
         body = _llm_response("```\nnot-json-content\n```")
         patch_cm, start = _patch_urlopen(body)
-        with caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"):
-            with patch_cm as mock_urlopen:
-                start(mock_urlopen)
-                result = classify_exchange("u", "a", **KW)
+        with (
+    caplog.at_level(logging.DEBUG, logger="hermes_icm_memory.classifier"),
+    patch_cm as mock_urlopen,
+):
+            start(mock_urlopen)
+            result = classify_exchange("u", "a", **KW)
         assert result is None
         assert any("LLM output not JSON" in r.message for r in caplog.records)
 
