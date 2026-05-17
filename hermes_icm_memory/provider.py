@@ -586,11 +586,10 @@ class IcmMemoryProvider:
         if not self.is_available():
             return ""
         recall_limit = self._config_int("recall_limit")
-        # v0.5.0 — stopword stripping (added in v0.4.8 as a workaround for
-        # ICM's MCP-recall ranker preferring memoir blobs over topic-
-        # tagged memories) is no longer needed: ``cli_runner.run_recall``
-        # now uses the icm CLI subprocess, whose ranker handles
-        # full-sentence queries correctly. We send the user's raw message.
+        # v0.5.0 — query passes through unstripped. Stopword stripping
+        # (v0.4.8) is too lossy in practice: a curated list will always
+        # drop tokens that matter for some user queries, and the user
+        # explicitly rejected the heuristic as inaccurate.
         recall_query = query
         # v0.1.1: ``_db_path is None`` is a legitimate "use icm canonical
         # default DB" sentinel (default-shared mode), not a "not initialized"

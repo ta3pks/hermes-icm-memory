@@ -103,9 +103,8 @@ def test_prefetch_calls_run_recall_with_config_limit_and_timeout(
     initialized_provider.prefetch(query="how do I bun?")
 
     # v0.5.0 — query passes through unstripped. The v0.4.8 stopword
-    # stripping was a workaround for ICM's MCP-recall ranker; v0.5.0
-    # routes recall through icm CLI subprocess instead, which ranks
-    # full-sentence queries correctly.
+    # stripping was a workaround for ICM's ranker; the user rejected
+    # the heuristic as too lossy, so v0.5.0+ sends the raw message.
     assert captured["query"] == "how do I bun?"
     assert captured["limit"] == 7
     assert captured["timeout_ms"] == 1234
