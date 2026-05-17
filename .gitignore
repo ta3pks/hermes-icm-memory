@@ -48,3 +48,11 @@ Thumbs.db
 
 # Claude Code session artifacts (logs, caches, worktrees)
 .claude/
+
+# Personal AI-assistant configs (vary per dev / agent)
+CLAUDE.md
+AGENTS.md
+.aider.conventions.md
+.windsurfrules
+.github/copilot-instructions.md
+.serena/
