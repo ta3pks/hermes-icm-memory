@@ -289,3 +289,41 @@ def test_infer_topic_distinguishes_better_match() -> None:
         "context-iron",       # 'iron' only
     ])
     assert mapping.infer_topic_from_query("hair iron", m) == "context-hair-iron"
+
+
+# ---------- v0.5.3: infer_topic_and_keywords -----------------------
+
+
+def test_infer_topic_and_keywords_returns_matched_tokens() -> None:
+    """v0.5.3 — returns BOTH the chosen topic AND the query tokens that
+    explicitly mapped to it. Used to replace the recall query so icm
+    scores the right entries highest (icm's natural-language ranker
+    craters topic-tagged entries' scores below threshold otherwise)."""
+    m = mapping.build_topic_keyword_map([
+        "context-hair-iron",
+        "context-moon-backend",
+    ])
+    topic, kws = mapping.infer_topic_and_keywords(
+        "whats going on with hair iron", m,
+    )
+    assert topic == "context-hair-iron"
+    assert kws == ["hair", "iron"]  # alphabetical for determinism
+
+
+def test_infer_topic_and_keywords_no_match_returns_empty() -> None:
+    """No topic overlap → (None, []) so caller can fall back to original query."""
+    m = mapping.build_topic_keyword_map(["context-hair-iron"])
+    assert mapping.infer_topic_and_keywords("what time is it", m) == (None, [])
+
+
+def test_infer_topic_and_keywords_picks_matched_subset_only() -> None:
+    """Only the topic's matched tokens are returned — not all topic keywords.
+
+    'hair' only matches; 'iron' is part of the topic name but missing from
+    query → not in the returned matched list. (Future: could expand to
+    full topic keywords; v0.5.3 conservative — only what mapped.)
+    """
+    m = mapping.build_topic_keyword_map(["context-hair-iron"])
+    topic, kws = mapping.infer_topic_and_keywords("hair stuff", m)
+    assert topic == "context-hair-iron"
+    assert kws == ["hair"]

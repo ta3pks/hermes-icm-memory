@@ -5,6 +5,60 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.3] — 2026-05-17
+
+**Two operator-driven fixes: matched-keyword recall + footer shows
+inferred topic.**
+
+### Why
+
+v0.5.2's topic-filtered recall worked for clean keyword queries
+(``hair iron``) but returned 0 hits for noisy natural-language ones
+(``whats going on with hair iron``). Root cause: ICM scores all
+entries against the full query FIRST, THEN applies the ``-t``
+filter. Stopword-heavy queries pump up unrelated entries' scores and
+push topic-tagged entries below threshold, so nothing makes it past
+the filter. The fix isn't a generic stopword strip (rejected
+upstream as too lossy) but a SURGICAL substitution that only kicks
+in when the query already proves overlap with a real topic name in
+the operator's corpus.
+
+### Changed
+
+- **``provider.prefetch`` now replaces the recall query with the
+  matched keywords when a topic is inferred.** Example: query
+  ``"whats going on with hair iron"`` infers topic
+  ``context-hair-iron`` with matched keywords ``["hair", "iron"]``,
+  so ``cli_runner.run_recall`` is invoked with
+  ``query="hair iron" -t context-hair-iron`` — the topic-tagged
+  entries score highest, the filter keeps them, ranking is clean.
+  When no topic is inferred, the original query passes through
+  unchanged. Cache key uses the substituted ``recall_query`` so the
+  same English question hits the same cache slot turn-over-turn.
+- **Footer now shows the inferred topic next to ``📚``** (operator
+  request). Format:
+  - ``📚 N <topic>`` when recall matched a topic
+  - ``📚 N`` when recall fired without a topic match
+  - ``📚 N <topic> · 💾 <save>`` for both halves
+  - ``📚 —`` heartbeat unchanged
+
+### Added
+
+- **``mapping.infer_topic_and_keywords(query, keyword_map)``** —
+  returns ``(topic, matched_keywords)`` tuple. The keywords are the
+  query tokens that explicitly mapped onto the chosen topic's name
+  (alphabetised for determinism — same English question reproduces
+  the same recall query on every turn).
+  ``mapping.infer_topic_from_query`` becomes a thin wrapper.
+- **``_INDICATOR_STATE`` per-session slot gains a ``recall_topic``
+  field** plus the ``_capture_recall_count(..., topic=...)`` kwarg.
+  ``_do_indicator_transform`` reads it; ``_render_indicator_footer``
+  accepts an optional ``recall_topic`` keyword. All resets clear all
+  three fields together.
+
+Regression guards added to ``tests/test_mapping.py`` and
+``tests/test_provider.py`` for both behaviours.
+
 ## [0.5.2] — 2026-05-17
 
 **Bug fix — indicator footer cross-contaminated between concurrent

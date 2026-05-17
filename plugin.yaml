@@ -1,5 +1,5 @@
 name: hermes-icm-memory
-version: 0.5.2
+version: 0.5.3
 description: "Hermes Agent memory provider plugin backed by ICM (Infinite Context Memory) — semantic, cross-session, cross-editor recall via the local icm CLI."
 author: nikos efthias
 # v0.4.3 — explicit kind=standalone so the general PluginManager loads us

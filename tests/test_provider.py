@@ -398,6 +398,59 @@ def test_indicator_directive_both_with_separator() -> None:
     assert "📚 2 · 💾 decisions-hermes" in out
 
 
+# ---------- v0.5.3: footer includes recall topic name ------------------------
+
+
+def test_indicator_footer_includes_recall_topic_when_provided() -> None:
+    """v0.5.3 — operator request: show the inferred topic next to 📚."""
+    from hermes_icm_memory import provider as _prov
+
+    out = _prov._render_indicator_footer(3, None, recall_topic="context-hair-iron")
+    assert out == "📚 3 context-hair-iron"
+
+
+def test_indicator_footer_omits_topic_when_not_provided() -> None:
+    """No recall_topic → bare ``📚 N`` (back-compat)."""
+    from hermes_icm_memory import provider as _prov
+
+    assert _prov._render_indicator_footer(3, None) == "📚 3"
+    assert _prov._render_indicator_footer(3, None, recall_topic=None) == "📚 3"
+
+
+def test_indicator_footer_topic_with_save() -> None:
+    """Both halves: ``📚 N <topic> · 💾 <save>``."""
+    from hermes_icm_memory import provider as _prov
+
+    out = _prov._render_indicator_footer(
+        5, "errors-resolved-foo", recall_topic="context-hair-iron",
+    )
+    assert out == "📚 5 context-hair-iron · 💾 errors-resolved-foo"
+
+
+def test_indicator_footer_heartbeat_unchanged() -> None:
+    """No recall, no save → still ``📚 —`` regardless of topic param."""
+    from hermes_icm_memory import provider as _prov
+
+    assert _prov._render_indicator_footer(0, None) == "📚 —"
+    assert _prov._render_indicator_footer(
+        0, None, recall_topic="context-hair-iron",
+    ) == "📚 —"
+
+
+def test_indicator_transform_emits_topic_in_footer(
+    reset_indicator_state: None,  # noqa: ARG001
+) -> None:
+    """End-to-end: when prefetch captures a topic, transform shows it."""
+    from hermes_icm_memory import provider as _prov
+
+    _prov._capture_recall_count(
+        4, session_id="s1", topic="context-hair-iron",
+    )
+    out = _prov._do_indicator_transform(response_text="hello", session_id="s1")
+    assert out is not None
+    assert out.endswith("📚 4 context-hair-iron")
+
+
 def test_indicator_directive_instructs_verbatim_echo() -> None:
     """Directive text must instruct the LLM to copy the footer literally —
     the directive is the v0.4.3 fallback when transform_llm_output isn't

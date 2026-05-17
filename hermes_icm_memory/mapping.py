@@ -151,27 +151,50 @@ def infer_topic_from_query(
 ) -> str | None:
     """Return the single best-matching topic for ``query``, or ``None``.
 
-    Scoring: count of query-tokens (alphanumeric runs ≥3 chars, case-
-    insensitive) that appear as keywords in the topic's name. The topic
-    with the highest score wins; alphabetical tie-break for determinism
-    (so a query that ties ``context-hair-iron`` and ``learnings-hair-iron``
-    consistently picks ``context-hair-iron``).
+    Thin wrapper around :func:`infer_topic_and_keywords` kept for callers
+    that only need the topic. New code should prefer the
+    ``(topic, matched_keywords)`` tuple variant.
+    """
+    topic, _kw = infer_topic_and_keywords(query, keyword_map)
+    return topic
 
-    Returns ``None`` when no token matches any indexed keyword, or when
-    ``keyword_map`` is empty. The caller is expected to fall back to an
-    un-filtered recall in that case.
+
+def infer_topic_and_keywords(
+    query: str, keyword_map: dict[str, list[str]],
+) -> tuple[str | None, list[str]]:
+    """Pick best-matching topic for ``query`` AND return the matched keywords.
+
+    The keywords are the subset of query tokens that actually mapped onto
+    the chosen topic's name. v0.5.3 uses this list to REPLACE the recall
+    query (icm's natural-language ranking buries topic-tagged entries
+    below noise; substituting the matched keywords as the query lets icm
+    score the right entries highest before its ``-t <topic>`` filter
+    applies).
+
+    Scoring: count of query-tokens (alphanumeric runs ≥3 chars,
+    case-insensitive) that appear as keywords in the topic's name.
+    Highest score wins; alphabetical tie-break for determinism.
+
+    Returns ``(None, [])`` when no token matches any indexed keyword,
+    when ``query`` is empty, or when ``keyword_map`` is empty.
     """
     if not query or not keyword_map:
-        return None
+        return None, []
     tokens = set(_WORD_TOKEN.findall(query.lower()))
+    # Score topics + remember which tokens scored against each.
     topic_scores: dict[str, int] = {}
+    topic_keywords: dict[str, list[str]] = {}
     for tok in tokens:
         for topic in keyword_map.get(tok, ()):
             topic_scores[topic] = topic_scores.get(topic, 0) + 1
+            topic_keywords.setdefault(topic, []).append(tok)
     if not topic_scores:
-        return None
-    # max score, alphabetical tie-break.
-    return min(topic_scores.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        return None, []
+    best = min(topic_scores.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+    # Keep deterministic order for the recall query: alphabetical so a
+    # given user query always produces the same recall string (cache-
+    # friendly and reproducible in logs).
+    return best, sorted(topic_keywords[best])
 
 
 def extract_recall_query(text: str, *, min_token_len: int = 3) -> str:

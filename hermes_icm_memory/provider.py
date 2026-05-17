@@ -85,13 +85,21 @@ def _indicator_slot(session_id: str | None) -> dict[str, Any]:
     """Get or create the per-session state slot. Centralises the default shape."""
     key = session_id or ""
     return _INDICATOR_STATE.setdefault(
-        key, {"recall_count": 0, "last_save_topic": None},
+        key, {"recall_count": 0, "last_save_topic": None, "recall_topic": None},
     )
 
 
-def _capture_recall_count(count: int, *, session_id: str | None = None) -> None:
-    """Producer hook called by ``IcmMemoryProvider.prefetch`` after run_recall."""
-    _indicator_slot(session_id)["recall_count"] = count
+def _capture_recall_count(
+    count: int, *, session_id: str | None = None, topic: str | None = None,
+) -> None:
+    """Producer hook called by ``IcmMemoryProvider.prefetch`` after run_recall.
+
+    v0.5.3 — also captures the inferred topic (if any) so the user-visible
+    footer can show it next to the 📚 count (operator request).
+    """
+    slot = _indicator_slot(session_id)
+    slot["recall_count"] = count
+    slot["recall_topic"] = topic
 
 
 def _capture_save_topic(topic: str, *, session_id: str | None = None) -> None:
@@ -100,15 +108,26 @@ def _capture_save_topic(topic: str, *, session_id: str | None = None) -> None:
         _indicator_slot(session_id)["last_save_topic"] = topic
 
 
-def _render_indicator_footer(recall: int, save: str | None) -> str:
+def _render_indicator_footer(
+    recall: int, save: str | None, *, recall_topic: str | None = None,
+) -> str:
     """Build the literal footer line the user sees at the bottom of replies.
 
-    Heartbeat (``📚 —``) when both halves are empty so the user always has
-    a per-turn liveness signal — the whole point of the indicator.
+    Format:
+        ``📚 N <topic>``           — recall fired, topic inferred
+        ``📚 N``                   — recall fired, no topic inferred
+        ``📚 N <topic> · 💾 <save>``  — both halves
+        ``💾 <save>``              — save only, no recall
+        ``📚 —``                  — heartbeat (nothing fired) — always shown
+                                    on silent turns so the user has a per-
+                                    turn liveness signal.
     """
     parts: list[str] = []
     if recall > 0:
-        parts.append(f"📚 {recall}")
+        if recall_topic:
+            parts.append(f"📚 {recall} {recall_topic}")
+        else:
+            parts.append(f"📚 {recall}")
     if save:
         parts.append(f"💾 {save}")
     return " · ".join(parts) if parts else "📚 —"
@@ -148,11 +167,15 @@ def _do_indicator_transform(
     slot = _indicator_slot(session_id)
     snapshot_recall = int(slot.get("recall_count", 0) or 0)
     snapshot_save = slot.get("last_save_topic")
+    snapshot_recall_topic = slot.get("recall_topic")
     # Reset THIS session's slot before formatting so the next-turn snapshot
     # starts clean even if the format step raises.
     slot["recall_count"] = 0
     slot["last_save_topic"] = None
-    footer = _render_indicator_footer(snapshot_recall, snapshot_save)
+    slot["recall_topic"] = None
+    footer = _render_indicator_footer(
+        snapshot_recall, snapshot_save, recall_topic=snapshot_recall_topic,
+    )
     cleaned = _FOOTER_LINE_RE.sub("", response_text).rstrip()
     return f"{cleaned}\n\n{footer}"
 
@@ -644,19 +667,23 @@ class IcmMemoryProvider:
         if not self.is_available():
             return ""
         recall_limit = self._config_int("recall_limit")
-        # v0.5.0 — query passes through unstripped. Stopword stripping
-        # (v0.4.8) is too lossy in practice: a curated list will always
-        # drop tokens that matter for some user queries, and the user
-        # explicitly rejected the heuristic as inaccurate.
-        recall_query = query
-        # v0.5.1 — topic-aware recall. Try to infer a specific topic from
-        # the user's query against the keyword index built at initialize
-        # time. When we hit a topic, recall with ``-t <topic>`` for a
-        # focused result set (working around ICM's poor natural-language
-        # ranking by narrowing the corpus). When we don't match any
-        # topic, falls back to general recall — same as pre-v0.5.1.
-        inferred_topic = mapping.infer_topic_from_query(
-            recall_query, self._topic_keyword_map,
+        # v0.5.3 — when the query's tokens overlap a real topic name in
+        # the corpus, REPLACE the recall query with just those matched
+        # keywords (and add ``-t <topic>``). ICM scores entries against
+        # the full natural-language query first, THEN applies ``-t``;
+        # the stopword-heavy form ("whats going on with hair iron")
+        # craters topic-tagged entries' scores below threshold so the
+        # filter returns 0. Substituting "hair iron" as the recall query
+        # lets icm score the right entries highest before the filter
+        # applies. This is NOT a generic stopword strip — only words
+        # that explicitly mapped to a real topic name are used.
+        # When no topic is inferred, the original query passes through
+        # unchanged (same as v0.5.0/v0.5.1).
+        inferred_topic, matched_keywords = mapping.infer_topic_and_keywords(
+            query, self._topic_keyword_map,
+        )
+        recall_query = (
+            " ".join(matched_keywords) if (inferred_topic and matched_keywords) else query
         )
         # v0.1.1: ``_db_path is None`` is a legitimate "use icm canonical
         # default DB" sentinel (default-shared mode), not a "not initialized"
@@ -687,7 +714,9 @@ class IcmMemoryProvider:
         # only for the fallback directive path in ``system_prompt_block``.
         capped_count = len(hits[:recall_limit])
         self._worker_state.recent_recall_count = capped_count
-        _capture_recall_count(capped_count, session_id=self._session_id)
+        _capture_recall_count(
+            capped_count, session_id=self._session_id, topic=inferred_topic,
+        )
         # v0.4.7 — observability. Surface BOTH the original and the
         # stopword-stripped query alongside the hit count and top topics
         # so operators can diagnose either a bad stripped query or an
