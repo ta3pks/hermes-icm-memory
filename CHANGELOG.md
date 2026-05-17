@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.4] — 2026-05-17
+
+**Observability — INFO log on every transform_llm_output invocation.**
+
+### Why
+
+v0.5.3 hit a paradox: ``provider.prefetch`` log shows ``raw_hits=3``
++ correct topic, but the Telegram footer still shows ``📚 —``. Two
+non-overlapping causes are observable from the OUTSIDE only as
+"footer wrong":
+
+1. ``transform_llm_output`` hook silently never fires → model's stale
+   ``📚 —`` from the system_prompt_block fallback directive sticks.
+2. The hook fires but Hermes passes a ``session_id`` that doesn't
+   match the slot ``provider.prefetch`` wrote to → the hook reads an
+   empty per-session slot and renders the heartbeat.
+
+### Added
+
+- **``_do_indicator_transform`` INFO log:**
+  ``transform_llm_output: session_id='...' known_slots=N
+  snapshot=(recall=N, topic='...', save='...')``. Fires on every
+  invocation; absence in the log proves the hook isn't being called,
+  presence with mismatched session_id confirms a key mismatch.
+
 ## [0.5.3] — 2026-05-17
 
 **Two operator-driven fixes: matched-keyword recall + footer shows

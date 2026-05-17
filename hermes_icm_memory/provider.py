@@ -168,6 +168,17 @@ def _do_indicator_transform(
     snapshot_recall = int(slot.get("recall_count", 0) or 0)
     snapshot_save = slot.get("last_save_topic")
     snapshot_recall_topic = slot.get("recall_topic")
+    # v0.5.4 — observability. INFO log fires on EVERY transform invocation
+    # so we can confirm (a) the hook is actually being called, and (b) the
+    # session_id Hermes passes here matches the session_id provider.prefetch
+    # used to write the slot. A footer mismatch with the prefetch log was
+    # otherwise indistinguishable from "hook silently never fired".
+    logger.info(
+        "transform_llm_output: session_id=%r known_slots=%d "
+        "snapshot=(recall=%d, topic=%r, save=%r)",
+        session_id, len(_INDICATOR_STATE),
+        snapshot_recall, snapshot_recall_topic, snapshot_save,
+    )
     # Reset THIS session's slot before formatting so the next-turn snapshot
     # starts clean even if the format step raises.
     slot["recall_count"] = 0
