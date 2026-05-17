@@ -615,6 +615,21 @@ class IcmMemoryProvider:
         capped_count = len(hits[:recall_limit])
         self._worker_state.recent_recall_count = capped_count
         _capture_recall_count(capped_count)
+        # v0.4.7 — observability. Surface query + hit count so operators
+        # can diagnose "📚 — even though I asked about X" cases without
+        # having to instrument the plugin or replay queries against icm
+        # manually. Query is truncated to 120 chars to keep log lines
+        # readable; top hit topics included so dispatching/ranking issues
+        # (e.g. "ICM MCP recall returns context-nikos blob first instead
+        # of context-hair-iron") are visible at INFO.
+        _q_preview = (query[:120] + "…") if len(query) > 120 else query
+        _top_topics = ", ".join(
+            str(h.get("topic") or "?") for h in hits[: min(3, recall_limit)]
+        ) or "none"
+        logger.info(
+            "prefetch: query=%r raw_hits=%d capped=%d top_topics=[%s]",
+            _q_preview, len(hits), capped_count, _top_topics,
+        )
         # Bound the cache to the latest entry. ``system_prompt_block`` only
         # reads ``_latest_prefetch_key`` (NFR-PERF-4), so older entries are
         # dead weight that would otherwise leak monotonically across the

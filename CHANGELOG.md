@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.7] — 2026-05-17
+
+**Observability — INFO log on every prefetch showing query + hit count
++ top topics.**
+
+### Why
+
+Operator hit a case where the indicator footer showed ``📚 —`` even
+though the model clearly used hair-iron memories in its reply (turned
+out the model fell back to calling the ``mcp_icm_*`` LLM tools
+directly, which don't flow through plugin state). Diagnosis required
+re-running the plugin's recall path manually and comparing against
+direct ``icm`` CLI behaviour — discovered that ICM's MCP-served
+recall path ranks results VERY differently from the CLI path on
+keyword-only mode (CLI returns hair-iron entries; MCP returns
+``context-nikos`` blob + empty-topic memoir entries first).
+
+The new log surfaces the actual query Hermes passes to ``prefetch``
+plus what ICM returned, so future "why didn't recall fire?" cases
+don't require manual replay.
+
+### Added
+
+- **`provider.prefetch` INFO log:**
+  ``prefetch: query='<truncated>' raw_hits=N capped=K top_topics=[t1, t2, t3]``.
+  Emitted after every recall. ``raw_hits`` is what ICM returned;
+  ``capped`` is what fed the indicator (after the ``recall_limit``
+  truncation). ``top_topics`` exposes ranking so operators can spot
+  ICM-side ranker drift.
+
 ## [0.4.6] — 2026-05-17
 
 **Bug fix — double indicator footer (stale ``📚 —`` heartbeat + fresh
