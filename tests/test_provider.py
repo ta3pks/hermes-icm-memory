@@ -429,13 +429,18 @@ def test_indicator_footer_topic_with_save() -> None:
 
 
 def test_indicator_footer_heartbeat_both_halves() -> None:
-    """v0.5.6 — full heartbeat shows BOTH halves: '📚 — · 💾 —'."""
+    """v0.5.6 — full heartbeat shows BOTH halves: '📚 — · 💾 —'.
+
+    v0.5.7 — when a topic was inferred but ``-t`` filter returned zero
+    hits, the recall half surfaces ``📚 0 <topic>`` so the user can
+    distinguish "tried and matched nothing" from pure "nothing ran".
+    """
     from hermes_icm_memory import provider as _prov
 
     assert _prov._render_indicator_footer(0, None) == "📚 — · 💾 —"
     assert _prov._render_indicator_footer(
         0, None, recall_topic="context-hair-iron",
-    ) == "📚 — · 💾 —"
+    ) == "📚 0 context-hair-iron · 💾 —"
 
 
 def test_indicator_transform_emits_topic_in_footer(

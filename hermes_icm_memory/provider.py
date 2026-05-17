@@ -125,6 +125,13 @@ def _render_indicator_footer(
     """
     if recall > 0:
         recall_part = f"📚 {recall} {recall_topic}" if recall_topic else f"📚 {recall}"
+    elif recall_topic:
+        # v0.5.7 — surface the inferred topic even when the -t filter
+        # narrowed results to zero, so the user sees the recall pipeline
+        # DID match a topic (just had no entries clear the threshold).
+        # Distinguishes "tried + found nothing" from pure-heartbeat "nothing
+        # ran".
+        recall_part = f"📚 0 {recall_topic}"
     else:
         recall_part = "📚 —"
     save_part = f"💾 {save}" if save else "💾 —"
@@ -877,10 +884,19 @@ class IcmMemoryProvider:
         well-formed footer when the model emits one; only falls back to
         replacing it when the model omits or malforms the footer.
         """
-        recall_half = (
-            f"📚 {recall_count} {recall_topic}" if recall_count > 0 and recall_topic
-            else (f"📚 {recall_count}" if recall_count > 0 else "📚 —")
-        )
+        # v0.5.7 — match _render_indicator_footer's "0 <topic>" form so the
+        # directive's recall_half matches what the hook would produce, and
+        # the model emits a footer that distinguishes "tried + matched
+        # nothing" from "nothing ran".
+        if recall_count > 0:
+            recall_half = (
+                f"📚 {recall_count} {recall_topic}" if recall_topic
+                else f"📚 {recall_count}"
+            )
+        elif recall_topic:
+            recall_half = f"📚 0 {recall_topic}"
+        else:
+            recall_half = "📚 —"
         save_half_placeholder = f"💾 {save_topic}" if save_topic else "💾 —"
         return (
             "════════════════════════════════════════════════════════════════\n"

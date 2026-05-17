@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.7] — 2026-05-17
+
+**UX — surface inferred topic in the recall half even when ``-t``
+filter narrowed results to zero.**
+
+### Symptom
+
+Live turn on Telegram: query ``"check icm on fedora vs ours"`` →
+prefetch correctly inferred topic ``context-fedora``, but ICM's
+``-t context-fedora`` filter combined with the ``"fedora"`` recall
+query returned zero entries (the topic's content doesn't have heavy
+``fedora`` keyword overlap). Footer rendered as ``📚 — · 💾 —``
+(pure heartbeat) — visually indistinguishable from a turn where
+recall never even tried.
+
+### Changed
+
+- **``_render_indicator_footer`` now emits ``📚 0 <topic>`` when
+  recall=0 AND a topic was inferred** (instead of collapsing to
+  ``📚 —``). Distinguishes "tried + matched nothing" from
+  "nothing ran". Bare ``📚 —`` still shown when no topic was
+  inferred (legitimate heartbeat case).
+- **``_render_indicator_directive`` applies the same logic** for
+  the recall-half placeholder it tells the model to copy. Without
+  this the directive would still say ``📚 —`` and the model would
+  emit that, giving the hook a "well-formed" footer it trusts —
+  bypassing the v0.5.7 fix.
+
+### Verified
+
+Interactive CLI in tmux: same ``check icm on fedora`` query →
+prefetch log ``raw_hits=0 inferred_topic='context-fedora'`` →
+footer in TUI now ``📚 0 context-fedora · 💾 —``.
+
 ## [0.5.6] — 2026-05-17
 
 **Auto-save via LLM tool call + footer always shows both halves.**
