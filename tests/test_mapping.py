@@ -224,3 +224,68 @@ def test_extract_recall_query_drops_short_tokens() -> None:
     out = mapping.extract_recall_query("io v0 ab hair iron")
     # 'io', 'v0', 'ab' are < 3 chars; 'hair' and 'iron' survive.
     assert out == "hair iron"
+
+
+# ---------- v0.5.1: topic-aware recall helpers -------------------------------
+
+
+def test_build_topic_keyword_map_indexes_hyphenated_topics() -> None:
+    """Hyphenated topic names contribute one keyword per segment ≥3 chars."""
+    m = mapping.build_topic_keyword_map([
+        "context-hair-iron",
+        "learnings-hair-iron",
+        "decisions-moon-backend",
+        "preferences",  # no '-' → skipped
+    ])
+    # Same keyword maps to all topics containing it.
+    assert set(m["hair"]) == {"context-hair-iron", "learnings-hair-iron"}
+    assert set(m["iron"]) == {"context-hair-iron", "learnings-hair-iron"}
+    assert m["moon"] == ["decisions-moon-backend"]
+    assert m["backend"] == ["decisions-moon-backend"]
+    # Category prefix is also indexed — generic, but scoring filters it out.
+    assert "context" in m
+    assert "preferences" not in m  # no hyphen, not indexed
+
+
+def test_build_topic_keyword_map_skips_short_segments() -> None:
+    """Segments shorter than 3 chars don't get indexed (avoid 'a', 'in', etc.)."""
+    m = mapping.build_topic_keyword_map(["a-b-cd-test"])
+    assert "a" not in m and "b" not in m and "cd" not in m
+    assert "test" in m
+
+
+def test_build_topic_keyword_map_empty_input() -> None:
+    """Empty topic list → empty map (no crash)."""
+    assert mapping.build_topic_keyword_map([]) == {}
+
+
+def test_infer_topic_picks_max_overlap_topic() -> None:
+    """Query 'hair iron status' → context-hair-iron / learnings-hair-iron tie
+    (both score 2 — 'hair' + 'iron'); tie-break alphabetical wins for
+    context-hair-iron < learnings-hair-iron."""
+    m = mapping.build_topic_keyword_map([
+        "context-hair-iron",
+        "learnings-hair-iron",
+        "context-moon-backend",
+    ])
+    assert mapping.infer_topic_from_query("hair iron status", m) == "context-hair-iron"
+
+
+def test_infer_topic_returns_none_when_no_match() -> None:
+    """Query with no overlapping keyword → None (caller falls back to general recall)."""
+    m = mapping.build_topic_keyword_map(["context-hair-iron"])
+    assert mapping.infer_topic_from_query("what time is it", m) is None
+
+
+def test_infer_topic_empty_map_returns_none() -> None:
+    """Empty keyword map → None (no topics indexed)."""
+    assert mapping.infer_topic_from_query("hair iron", {}) is None
+
+
+def test_infer_topic_distinguishes_better_match() -> None:
+    """When two topics share one keyword but only one shares both, that one wins."""
+    m = mapping.build_topic_keyword_map([
+        "context-hair-iron",  # 'hair' + 'iron'
+        "context-iron",       # 'iron' only
+    ])
+    assert mapping.infer_topic_from_query("hair iron", m) == "context-hair-iron"

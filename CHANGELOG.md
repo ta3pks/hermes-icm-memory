@@ -5,6 +5,55 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-05-17
+
+**Topic-aware recall — when the user's query overlaps a project topic
+name, recall with ``-t <topic>`` to focus past the bad ranker.**
+
+### Why
+
+v0.5.0 switched recall to the CLI subprocess hoping that would fix
+ICM's bad ranking on natural-language queries; live testing showed
+the CLI ranker is no better than MCP for full sentences. v0.4.8's
+stopword stripping helped but the operator rejected it as too lossy
+(curated wordlist will always drop something that matters for some
+query). This release derives recall keywords from the LIVE corpus —
+the actual topic names ``icm topics`` reports — and uses them only as
+a filter hint (``-t <topic>``), never to mutate the query itself.
+
+### Added
+
+- **``mapping.build_topic_keyword_map(topics)``** — pure helper that
+  indexes every hyphenated topic name (e.g. ``context-hair-iron``
+  contributes keywords ``hair`` + ``iron``) into a ``{keyword:
+  [topic, ...]}`` map. Segments < 3 chars dropped. No magic wordlist —
+  keywords come from the operator's own corpus.
+- **``mapping.infer_topic_from_query(query, keyword_map)``** — picks
+  the single topic with the highest keyword-overlap score against the
+  query. Alphabetical tie-break for determinism. Returns ``None`` when
+  no token in the query matches any indexed keyword.
+- **``hooks.run_prefetch``** now accepts an optional ``topic`` kwarg
+  threaded through to ``cli_runner.run_recall`` as ``-t <topic>``.
+- **``provider.initialize``** fetches ``cli_runner.run_topics`` and
+  builds the keyword map once per session. INFO log reports how many
+  topics produced how many keywords. Falls back to an empty map on
+  any topics-fetch failure (so prefetch keeps working).
+- **``provider.prefetch``** runs ``infer_topic_from_query`` against the
+  cached keyword map and threads the result to ``hooks.run_prefetch``.
+  The v0.4.7 INFO log gains an ``inferred_topic=`` field so operators
+  can see when topic-filtered recall fired.
+
+### Operational notes
+
+- **Topic index refreshes only at session boundary** (each new
+  ``initialize`` call). Topics added mid-session won't be visible
+  until next init.
+- **Single topic per recall** — ICM's ``-t`` flag takes one topic at a
+  time, and the inference picks the highest-overlap one. Queries that
+  span multiple unrelated topics will only get one of them
+  topic-filtered; the rest fall through general recall on the next
+  turn or via the LLM's own ``mcp_icm_*`` tool calls.
+
 ## [0.5.0] — 2026-05-17
 
 **Recall correctness — route ``run_recall`` through the ``icm`` CLI

@@ -115,6 +115,65 @@ _STOPWORDS: Final[frozenset[str]] = frozenset({
 })
 
 
+def build_topic_keyword_map(topics: list[str]) -> dict[str, list[str]]:
+    """Build a keyword → matching-topics index from icm topic names (v0.5.1).
+
+    Used by :func:`infer_topic_from_query` to decide whether a user query
+    overlaps a specific topic well enough to add ``-t <topic>`` to the
+    ``icm recall`` invocation. The keywords come from the LIVE corpus
+    (the actual topic names ``icm topics`` reports), so we never need a
+    hard-coded wordlist that risks drifting from the operator's data.
+
+    Splits each topic name on ``"-"`` and indexes every segment ≥
+    ``min_token_len`` (3) characters. A topic like ``context-hair-iron``
+    therefore contributes the keyword ``"hair"`` AND the keyword
+    ``"iron"`` (the ``"context"`` segment is also indexed but is
+    generic — scoring in :func:`infer_topic_from_query` deals with
+    that). Topics with no ``"-"`` (e.g. bare ``"preferences"``) are
+    skipped — they have no project handle to match on.
+
+    Returns ``{keyword: [topic, ...]}``; a single keyword can map to
+    multiple topics (``"hair"`` → both ``"context-hair-iron"`` and
+    ``"learnings-hair-iron"``).
+    """
+    keyword_map: dict[str, list[str]] = {}
+    for topic in topics:
+        if not topic or "-" not in topic:
+            continue
+        for kw in topic.lower().split("-"):
+            if len(kw) >= 3:
+                keyword_map.setdefault(kw, []).append(topic)
+    return keyword_map
+
+
+def infer_topic_from_query(
+    query: str, keyword_map: dict[str, list[str]],
+) -> str | None:
+    """Return the single best-matching topic for ``query``, or ``None``.
+
+    Scoring: count of query-tokens (alphanumeric runs ≥3 chars, case-
+    insensitive) that appear as keywords in the topic's name. The topic
+    with the highest score wins; alphabetical tie-break for determinism
+    (so a query that ties ``context-hair-iron`` and ``learnings-hair-iron``
+    consistently picks ``context-hair-iron``).
+
+    Returns ``None`` when no token matches any indexed keyword, or when
+    ``keyword_map`` is empty. The caller is expected to fall back to an
+    un-filtered recall in that case.
+    """
+    if not query or not keyword_map:
+        return None
+    tokens = set(_WORD_TOKEN.findall(query.lower()))
+    topic_scores: dict[str, int] = {}
+    for tok in tokens:
+        for topic in keyword_map.get(tok, ()):
+            topic_scores[topic] = topic_scores.get(topic, 0) + 1
+    if not topic_scores:
+        return None
+    # max score, alphabetical tie-break.
+    return min(topic_scores.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+
 def extract_recall_query(text: str, *, min_token_len: int = 3) -> str:
     """Strip stopwords + short tokens from a natural-language message.
 

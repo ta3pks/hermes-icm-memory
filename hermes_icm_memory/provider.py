@@ -32,7 +32,7 @@ from typing import Any, Final
 
 import yaml
 
-from . import cli_runner, config, hooks
+from . import cli_runner, config, hooks, mapping
 
 __all__ = ["IcmMemoryProvider"]
 
@@ -167,6 +167,11 @@ class IcmMemoryProvider:
         self._prefetch_cache: dict[int, list[dict[str, Any]]] = {}
         self._latest_prefetch_key: int | None = None
         self._worker_state: hooks.WorkerState = hooks.WorkerState()
+        # v0.5.1 — keyword→topic index built from icm topics list at
+        # initialize time. Empty dict (not None) when no topics fetched
+        # or when the icm corpus is empty, so per-prefetch lookup stays
+        # branch-free at the call site.
+        self._topic_keyword_map: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------ tool schemas
 
@@ -279,6 +284,34 @@ class IcmMemoryProvider:
                 extra={"err": repr(exc)},
             )
             self._available = False
+
+        # v0.5.1 — build the keyword→topic index from the live corpus so
+        # prefetch can add ``-t <topic>`` when the user's query overlaps a
+        # specific project. Done lazily once per session (per initialize
+        # call); refreshes naturally on the next session start. Topics
+        # path uses the warm MCP daemon (not the v0.5.0 CLI subprocess
+        # path — only RECALL is broken in MCP, not topics).
+        try:
+            topics_response = cli_runner.run_topics(
+                db_path=self._db_path,
+                timeout_ms=self._config_int("command_timeout_read_ms"),
+            )
+            topic_names = [
+                str(t["topic"]) for t in topics_response
+                if isinstance(t, dict) and t.get("topic")
+            ]
+            self._topic_keyword_map = mapping.build_topic_keyword_map(topic_names)
+            logger.info(
+                "initialize: built topic_keyword_map from %d topics → %d keywords",
+                len(topic_names), len(self._topic_keyword_map),
+            )
+        except Exception as exc:
+            logger.debug(
+                "initialize: topic_keyword_map build failed (non-fatal): %r",
+                exc,
+                extra={"err": repr(exc)},
+            )
+            self._topic_keyword_map = {}
 
     # ------------------------------------------------------------------ config
 
@@ -591,6 +624,15 @@ class IcmMemoryProvider:
         # drop tokens that matter for some user queries, and the user
         # explicitly rejected the heuristic as inaccurate.
         recall_query = query
+        # v0.5.1 — topic-aware recall. Try to infer a specific topic from
+        # the user's query against the keyword index built at initialize
+        # time. When we hit a topic, recall with ``-t <topic>`` for a
+        # focused result set (working around ICM's poor natural-language
+        # ranking by narrowing the corpus). When we don't match any
+        # topic, falls back to general recall — same as pre-v0.5.1.
+        inferred_topic = mapping.infer_topic_from_query(
+            recall_query, self._topic_keyword_map,
+        )
         # v0.1.1: ``_db_path is None`` is a legitimate "use icm canonical
         # default DB" sentinel (default-shared mode), not a "not initialized"
         # signal. The ``_init_args`` check upstream handles the latter.
@@ -602,6 +644,7 @@ class IcmMemoryProvider:
                 timeout_ms=self._config_int("command_timeout_read_ms"),
                 cache=self._prefetch_cache,
                 use_embeddings=self._config_bool("use_embeddings"),
+                topic=inferred_topic,
             )
         except Exception as exc:  # AD-07 boundary — helper already swallows
             logger.warning(
@@ -632,8 +675,10 @@ class IcmMemoryProvider:
             str(h.get("topic") or "?") for h in hits[: min(3, recall_limit)]
         ) or "none"
         logger.info(
-            "prefetch: query=%r recall_query=%r raw_hits=%d capped=%d top_topics=[%s]",
-            _q_preview, _rq_preview, len(hits), capped_count, _top_topics,
+            "prefetch: query=%r recall_query=%r inferred_topic=%r "
+            "raw_hits=%d capped=%d top_topics=[%s]",
+            _q_preview, _rq_preview, inferred_topic,
+            len(hits), capped_count, _top_topics,
         )
         # Bound the cache to the latest entry. ``system_prompt_block`` only
         # reads ``_latest_prefetch_key`` (NFR-PERF-4), so older entries are

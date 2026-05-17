@@ -422,6 +422,7 @@ def run_prefetch(
     timeout_ms: int,
     cache: dict[int, list[dict[str, Any]]],
     use_embeddings: bool = False,
+    topic: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run a single recall, cache hits keyed by ``hash(query)``.
 
@@ -449,6 +450,7 @@ def run_prefetch(
             db_path=db_path,
             timeout_ms=timeout_ms,
             use_embeddings=use_embeddings,
+            topic=topic,
         )
     except ICMError as exc:
         logger.warning(
