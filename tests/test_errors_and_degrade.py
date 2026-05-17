@@ -133,13 +133,17 @@ def test_mcp_client_empty_response_produces_empty_prefetch(
     """MCP client returning [] produces empty prefetch.
 
     v0.4: the MCP client always returns [] on failure (AD-07 degrade),
-    so prefetch gets a valid empty list and produces "".
+    so prefetch gets a valid empty list and produces no recalled-memories
+    block. v0.5.5: prefetch still emits the indicator directive so the
+    per-turn user-message injection carries a fresh footer instruction;
+    on the no-hits path it's the heartbeat (📚 —).
     """
     client = _make_mock_client(call_recall_return=[])
     monkeypatch.setattr(cli_runner, "_client", client)
 
     result = initialized_provider.prefetch(query="x")
-    assert result == ""
+    assert "📖 Recalled memories" not in result  # no hits to show
+    assert "📚 —" in result  # heartbeat directive
 
 
 # ---------- Mode 5: happy path -----------------------------------------------

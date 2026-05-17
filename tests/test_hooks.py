@@ -156,7 +156,12 @@ def test_prefetch_swallows_icm_errors_returns_empty(
     with caplog.at_level(logging.WARNING, logger="hermes_icm_memory.hooks"):
         result = initialized_provider.prefetch(query="x")
 
-    assert result == ""
+    # v0.5.5 — prefetch always returns at minimum the indicator directive
+    # so the per-turn user-message injection carries a fresh footer
+    # instruction (the system_prompt_block path can't refresh per turn).
+    # On error: no recalled-memories block, just the heartbeat directive.
+    assert "📖 Recalled memories" not in result  # no hits to show
+    assert "📚 —" in result  # heartbeat directive
     assert initialized_provider._prefetch_cache[hash("x")] == []
     assert any(
         "prefetch" in record.message or "recall" in record.message

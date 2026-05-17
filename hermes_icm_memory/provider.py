@@ -756,11 +756,30 @@ class IcmMemoryProvider:
         self._prefetch_cache = {latest_key: self._prefetch_cache.get(latest_key, [])}
         self._latest_prefetch_key = latest_key
         # ``format_block`` returns ``""`` on empty hits — no extra short-circuit.
-        return hooks.format_block(
+        block = hooks.format_block(
             cache=self._prefetch_cache,
             latest_key=latest_key,
             recall_limit=recall_limit,
         )
+        # v0.5.5 — append the indicator directive HERE so it ships in the
+        # per-turn user-message injection (Hermes pipes ``prefetch()``'s
+        # return through ``_ext_prefetch_cache`` into every turn's user
+        # message). The competing path —
+        # ``system_prompt_block`` — fires once at session start and gets
+        # cached, so its directive renders with empty state (0 hits, no
+        # topic) and the LLM ends up copying a stale ``📚 —`` into its
+        # reply that streaming-rendering clients (TUI / Telegram) show
+        # to the user BEFORE the ``transform_llm_output`` hook can
+        # rewrite the final string. Putting a FRESH directive into the
+        # per-turn injection means the model sees ``recall_count`` /
+        # ``recall_topic`` reflecting THIS turn and the streamed footer
+        # is correct without depending on hook-time text rewriting.
+        directive = self._render_indicator_directive(
+            capped_count, save_topic=None, recall_topic=inferred_topic,
+        )
+        if block:
+            return f"{block}\n\n{directive}"
+        return directive
 
     # ------------------------------------------------------------------ system_prompt_block
 
@@ -819,18 +838,28 @@ class IcmMemoryProvider:
         return "\n\n".join(blocks) if blocks else ""
 
     @staticmethod
-    def _render_indicator_directive(recall_count: int, save_topic: str | None) -> str:
+    def _render_indicator_directive(
+        recall_count: int,
+        save_topic: str | None,
+        *,
+        recall_topic: str | None = None,
+    ) -> str:
         """Build the literal indicator block the LLM is asked to echo verbatim.
 
-        v0.4.3 — fallback path only. The primary indicator path is the
-        :func:`_do_indicator_transform` ``transform_llm_output`` hook, which
-        appends the footer programmatically and detects already-appended
-        footers (so this directive being followed doesn't cause a double).
-        Kept as belt-and-suspenders for code paths the hook can't reach
-        (e.g. streamed partial deliveries that bypass the final-response
-        transform).
+        v0.5.5 — also takes ``recall_topic`` so the directive reflects the
+        per-turn topic detection. v0.4.3 — fallback / streaming path. The
+        ``transform_llm_output`` hook runs AFTER streaming has already
+        rendered the response in the TUI / Telegram client, so the only
+        way to get a CORRECT per-turn footer into the streamed text is
+        for the model to emit it. The directive (injected fresh per turn
+        via :meth:`prefetch`'s return value in v0.5.5) tells the model
+        what to print; the hook still runs at the end to ensure the
+        final ``final_response`` carries the same canonical footer
+        regardless of model compliance.
         """
-        footer = _render_indicator_footer(recall_count, save_topic)
+        footer = _render_indicator_footer(
+            recall_count, save_topic, recall_topic=recall_topic,
+        )
         return (
             "════════════════════════════════════════════════════════════════\n"
             "MANDATORY OUTPUT FORMAT — MEMORY INDICATOR FOOTER\n"

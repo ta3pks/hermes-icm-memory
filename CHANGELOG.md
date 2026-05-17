@@ -5,6 +5,56 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.5] — 2026-05-17
+
+**Indicator footer now appears in streamed clients (TUI / Telegram) —
+inject the directive into the per-turn prefetch return so the model
+copies the right footer BEFORE streaming starts.**
+
+### Symptom
+
+After v0.5.3 the ``transform_llm_output`` hook was firing correctly
+with the right per-session snapshot (verified via v0.5.4 INFO log),
+yet the user-visible footer in interactive TUI and Telegram still
+showed ``📚 —``. The one-shot path (``hermes -z PROMPT``, which
+prints ``final_response`` after the hook runs) showed the correct
+``📚 N <topic>``.
+
+### Root cause
+
+The transform hook fires AFTER the model's response has streamed to
+the user. Streaming clients (TUI, Telegram) render text live; once a
+chunk is on screen the hook's later re-rewrite of ``final_response``
+never re-renders. The model was copying a stale ``📚 —`` from the
+indicator directive — because that directive was rendered inside
+``system_prompt_block``, which is built ONCE per session and cached
+(``conversation_loop.py`` reuses ``stored_prompt`` on every turn).
+At session-start time, prefetch hadn't fired yet → directive had
+``recall_count=0`` → stale heartbeat for the entire session.
+
+### Fixed
+
+- **``provider.prefetch`` now appends the indicator directive (with
+  THIS turn's recall_count + recall_topic) to its return value.**
+  Hermes pipes ``prefetch()``'s return through ``_ext_prefetch_cache``
+  into every turn's user message (``conversation_loop.py:687-695``),
+  so the model sees a fresh directive each turn and copies the right
+  footer into its (streamed) response.
+- **``_render_indicator_directive`` accepts ``recall_topic=`` kwarg**
+  so the directive's footer line includes the inferred topic when
+  one matched (matches the format emitted by the
+  ``transform_llm_output`` hook → no double-stamp if both fire).
+
+### Behaviour change worth noting
+
+- Two existing degrade tests (``test_prefetch_swallows_icm_errors_returns_empty``,
+  ``test_mcp_client_empty_response_produces_empty_prefetch``) updated:
+  ``prefetch()`` no longer returns ``""`` on no-hits / icm-error
+  paths — it returns the heartbeat directive (so the per-turn
+  injection still carries a fresh ``📚 —`` even when recall fails).
+  Tests now assert the heartbeat is present, not that the string is
+  empty.
+
 ## [0.5.4] — 2026-05-17
 
 **Observability — INFO log on every transform_llm_output invocation.**
