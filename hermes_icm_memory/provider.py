@@ -68,21 +68,36 @@ _DEFAULT_CONFIG: Final[dict[str, Any]] = {
 # the memory_manager instance lands in the footer appended by the
 # PluginManager instance.
 
-_INDICATOR_STATE: dict[str, Any] = {
-    "recall_count": 0,
-    "last_save_topic": None,
-}
+#: v0.5.2 — keyed by ``session_id`` to prevent cross-session contamination
+#: when two concurrent sessions' prefetches fire in rapid succession (the
+#: hair-iron turn + a system-note interrupted-turn observed live in v0.5.1).
+#: Pre-v0.5.2 the second prefetch's counts overwrote the first, so the
+#: transform_llm_output hook fired for session A read session B's stale
+#: numbers (footer showed ``📚 —`` for a turn that had 3 hair-iron hits).
+#:
+#: An empty string key is the bucket for "session_id unknown" (best-effort
+#: fallback so a missing kwarg doesn't crash; should never happen in
+#: practice since Hermes passes session_id everywhere).
+_INDICATOR_STATE: dict[str, dict[str, Any]] = {}
 
 
-def _capture_recall_count(count: int) -> None:
+def _indicator_slot(session_id: str | None) -> dict[str, Any]:
+    """Get or create the per-session state slot. Centralises the default shape."""
+    key = session_id or ""
+    return _INDICATOR_STATE.setdefault(
+        key, {"recall_count": 0, "last_save_topic": None},
+    )
+
+
+def _capture_recall_count(count: int, *, session_id: str | None = None) -> None:
     """Producer hook called by ``IcmMemoryProvider.prefetch`` after run_recall."""
-    _INDICATOR_STATE["recall_count"] = count
+    _indicator_slot(session_id)["recall_count"] = count
 
 
-def _capture_save_topic(topic: str) -> None:
+def _capture_save_topic(topic: str, *, session_id: str | None = None) -> None:
     """Producer hook called by ``hooks.submit_triggers`` / classifier worker."""
     if topic:
-        _INDICATOR_STATE["last_save_topic"] = topic
+        _indicator_slot(session_id)["last_save_topic"] = topic
 
 
 def _render_indicator_footer(recall: int, save: str | None) -> str:
@@ -117,25 +132,26 @@ _FOOTER_LINE_RE: Final[re.Pattern[str]] = re.compile(
 
 def _do_indicator_transform(
     response_text: str = "",
+    session_id: str = "",
     **_kwargs: Any,
 ) -> str | None:
     """``transform_llm_output`` plugin-hook implementation.
 
-    Reads :data:`_INDICATOR_STATE`, strips any trailing ``📚 …`` footer
-    line (a stale one the model may have copied from the
-    ``system_prompt_block`` directive, OR the prior turn's footer if the
-    upstream pipeline re-feeds output anywhere), and appends a fresh one
-    rendered from the current state. Resets the state for the next turn.
-    Returns ``None`` when the response is empty.
+    Reads the per-session slot in :data:`_INDICATOR_STATE` (v0.5.2 — keyed
+    by ``session_id`` so concurrent sessions don't contaminate each other's
+    footers), strips any trailing ``📚 …`` line, and appends a fresh one
+    rendered from the snapshot. Resets that session's state. Returns
+    ``None`` when the response is empty.
     """
     if not response_text:
         return None
-    snapshot_recall = int(_INDICATOR_STATE.get("recall_count", 0) or 0)
-    snapshot_save = _INDICATOR_STATE.get("last_save_topic")
-    # Reset BEFORE building the new text so the next-turn snapshot starts
-    # clean even if the format step somehow raises.
-    _INDICATOR_STATE["recall_count"] = 0
-    _INDICATOR_STATE["last_save_topic"] = None
+    slot = _indicator_slot(session_id)
+    snapshot_recall = int(slot.get("recall_count", 0) or 0)
+    snapshot_save = slot.get("last_save_topic")
+    # Reset THIS session's slot before formatting so the next-turn snapshot
+    # starts clean even if the format step raises.
+    slot["recall_count"] = 0
+    slot["last_save_topic"] = None
     footer = _render_indicator_footer(snapshot_recall, snapshot_save)
     cleaned = _FOOTER_LINE_RE.sub("", response_text).rstrip()
     return f"{cleaned}\n\n{footer}"
@@ -296,10 +312,19 @@ class IcmMemoryProvider:
                 db_path=self._db_path,
                 timeout_ms=self._config_int("command_timeout_read_ms"),
             )
+            # v0.5.2 — strip the ': N memories' suffix that ICM's MCP
+            # topics tool appends to each topic string (e.g.
+            # ``context-hair-iron: 3 memories`` → ``context-hair-iron``).
+            # Pre-v0.5.2 the suffixed string was passed both to the
+            # keyword index and to ``-t <topic>`` in recall; icm's filter
+            # accepted it only via substring match. Cleaning here gives
+            # us exact-match filtering and a tidy ``inferred_topic=`` log.
             topic_names = [
-                str(t["topic"]) for t in topics_response
+                str(t["topic"]).split(":", 1)[0].strip()
+                for t in topics_response
                 if isinstance(t, dict) and t.get("topic")
             ]
+            topic_names = [t for t in topic_names if t]  # drop empties post-strip
             self._topic_keyword_map = mapping.build_topic_keyword_map(topic_names)
             logger.info(
                 "initialize: built topic_keyword_map from %d topics → %d keywords",
@@ -662,7 +687,7 @@ class IcmMemoryProvider:
         # only for the fallback directive path in ``system_prompt_block``.
         capped_count = len(hits[:recall_limit])
         self._worker_state.recent_recall_count = capped_count
-        _capture_recall_count(capped_count)
+        _capture_recall_count(capped_count, session_id=self._session_id)
         # v0.4.7 — observability. Surface BOTH the original and the
         # stopword-stripped query alongside the hit count and top topics
         # so operators can diagnose either a bad stripped query or an
@@ -784,7 +809,7 @@ class IcmMemoryProvider:
         self,
         user_content: str = "",
         assistant_content: str = "",
-        **kwargs: Any,  # noqa: ARG002 — Hermes contract may pass extra kwargs.
+        **kwargs: Any,
     ) -> None:
         """Detect triggers from the just-completed turn and enqueue writes.
 
@@ -801,6 +826,13 @@ class IcmMemoryProvider:
             # so regex path runs instead.
             classifier_enabled = False
 
+        # v0.5.2 — Hermes always passes session_id in kwargs; thread it through
+        # so save captures land in the right per-session indicator slot.
+        # Falls back to ``self._session_id`` (set by initialize) when the
+        # kwarg is missing — e.g. test callers that don't simulate Hermes
+        # fully.
+        session_id = str(kwargs.get("session_id") or self._session_id or "")
+
         try:
             hooks.submit_triggers(
                 self._worker_state,
@@ -809,6 +841,7 @@ class IcmMemoryProvider:
                 project=None,
                 every_n_turns=self._config_int("periodic_progress_every_n_turns"),
                 classifier_enabled=classifier_enabled,
+                session_id=session_id,
             )
         except Exception as exc:  # outer boundary — must not raise into the turn
             logger.warning(

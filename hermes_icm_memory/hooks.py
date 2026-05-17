@@ -249,10 +249,11 @@ def classifier_loop(
             # v0.4.3 — also publish to module-level indicator state so the
             # transform_llm_output hook (which fires on a different
             # IcmMemoryProvider instance under kind=standalone dual-load)
-            # can see this save when it builds the footer.
+            # can see this save when it builds the footer. v0.5.2 — keyed
+            # per-session via the session_id carried on the ClassifyTask.
             from . import provider as _prov
 
-            _prov._capture_save_topic(scoped_topic)
+            _prov._capture_save_topic(scoped_topic, session_id=task.session_id)
         except queue.Full:
             logger.debug(
                 "classifier: write queue full; dropping classified memory",
@@ -528,6 +529,7 @@ def submit_triggers(
     project: str | None,
     every_n_turns: int,
     classifier_enabled: bool = False,
+    session_id: str = "",
 ) -> None:
     """``sync_turn`` body: detect → enqueue → drop on full with one WARN per burst.
 
@@ -548,7 +550,9 @@ def submit_triggers(
     state.turn_index += 1
 
     if classifier_enabled:
-        _submit_classify_task(state, user_content, assistant_content, project)
+        _submit_classify_task(
+            state, user_content, assistant_content, project, session_id=session_id,
+        )
         # Also fire periodic progress check regardless of content.
         _submit_periodic_context(
             state, turn_index=state.turn_index,
@@ -590,10 +594,10 @@ def submit_triggers(
             state.recent_stores.append((topic, content[:120]))
             # v0.4.3 — also publish to module-level indicator state for the
             # transform_llm_output hook (dual-load — see _classifier_worker
-            # comment for why).
+            # comment for why). v0.5.2 — keyed per-session.
             from . import provider as _prov
 
-            _prov._capture_save_topic(topic)
+            _prov._capture_save_topic(topic, session_id=session_id)
         except queue.Full:
             _warn_overflow_once(state)
         except Exception as exc:  # defensive — never raise into the turn
@@ -609,6 +613,8 @@ def _submit_classify_task(
     user_content: str,
     assistant_content: str,
     project: str | None,
+    *,
+    session_id: str = "",
 ) -> None:
     """Enqueue a ``ClassifyTask`` — drop on full with DEBUG log."""
     if state.classify_queue is None or state.class_disabled:
@@ -617,6 +623,7 @@ def _submit_classify_task(
         user_text=user_content,
         assistant_text=assistant_content,
         project=project,
+        session_id=session_id,
     )
     try:
         state.classify_queue.put_nowait(task)

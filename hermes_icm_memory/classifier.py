@@ -65,11 +65,17 @@ class ClassifyTask:
     """A single exchange awaiting classification by the classifier worker.
 
     Enqueued by ``hooks.submit_triggers`` when ``classifier_enabled`` is true.
+
+    v0.5.2 — carries ``session_id`` so the indicator-state capture in
+    :mod:`hermes_icm_memory.hooks._classifier_worker` lands the save topic
+    in the right per-session slot (the classifier worker runs on a daemon
+    thread and only sees the data the producer stamped onto the task).
     """
 
     user_text: str
     assistant_text: str
     project: str | None
+    session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

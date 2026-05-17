@@ -535,15 +535,56 @@ def test_indicator_transform_resets_state_after_consume(
     assert _prov._INDICATOR_STATE["last_save_topic"] is None
 
 
+def test_indicator_state_per_session_no_contamination(
+    reset_indicator_state: None,  # noqa: ARG001
+) -> None:
+    """v0.5.2 regression: two sessions' captures must NOT cross-contaminate.
+
+    Pre-v0.5.2 ``_INDICATOR_STATE`` was a single dict; if session B's
+    prefetch fired between session A's prefetch and A's transform, B's
+    counts overwrote A's. Live symptom: hair-iron turn (3 hits) showed
+    ``📚 —`` because the system-note interrupted-turn's prefetch
+    (10 unrelated hits) reset state to its own values which the next
+    transform consumed. v0.5.2 keys state by session_id.
+    """
+    from hermes_icm_memory import provider as _prov
+
+    _prov._capture_recall_count(3, session_id="session-A")
+    _prov._capture_recall_count(10, session_id="session-B")
+    _prov._capture_save_topic("learnings-hair-iron", session_id="session-A")
+
+    # Each session's transform reads its OWN slot.
+    out_a = _prov._do_indicator_transform(
+        response_text="reply A", session_id="session-A",
+    )
+    out_b = _prov._do_indicator_transform(
+        response_text="reply B", session_id="session-B",
+    )
+    assert out_a is not None and "📚 3 · 💾 learnings-hair-iron" in out_a
+    assert out_b is not None and "📚 10" in out_b
+    assert "💾" not in out_b, "session B never captured a save topic"
+
+    # Both slots are reset after their respective transforms.
+    out_a2 = _prov._do_indicator_transform(
+        response_text="next reply A", session_id="session-A",
+    )
+    assert out_a2 is not None and out_a2.endswith("📚 —")
+
+
 def test_capture_save_topic_ignores_empty_topic(
     reset_indicator_state: None,  # noqa: ARG001
 ) -> None:
-    """Defensive: an empty/None topic must not clobber a valid prior capture."""
+    """Defensive: an empty/None topic must not clobber a valid prior capture.
+
+    v0.5.2 — state is now keyed by session_id; without an explicit
+    ``session_id`` kwarg the captures land in the empty-string fallback
+    slot (the "unknown session" bucket).
+    """
     from hermes_icm_memory import provider as _prov
 
     _prov._capture_save_topic("preferences")
     _prov._capture_save_topic("")  # ignored
-    assert _prov._INDICATOR_STATE["last_save_topic"] == "preferences"
+    assert _prov._INDICATOR_STATE[""]["last_save_topic"] == "preferences"
 
 
 # ---------- v0.4.3: defensive register() under dual-load ---------------------

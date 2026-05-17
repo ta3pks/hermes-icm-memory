@@ -5,6 +5,57 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] — 2026-05-17
+
+**Bug fix — indicator footer cross-contaminated between concurrent
+sessions; cosmetic fix to ``inferred_topic=`` log.**
+
+### Symptom
+
+After v0.5.1 deployed, recall worked perfectly for "wheres hair iron
+left" (``inferred_topic='context-hair-iron'``, 3 hits all
+``context-hair-iron``) — but the reply's footer showed ``📚 —``
+instead of ``📚 3``. A separate session's system-note prefetch (10
+unrelated hits) had fired right after the hair-iron prefetch and
+overwritten the module-level state. By the time the hair-iron turn's
+transform fired, the slot had been reset by the other session's
+transform.
+
+### Fixed
+
+- **``provider._INDICATOR_STATE`` is now keyed by ``session_id``**
+  (was a single shared dict). New ``_indicator_slot(session_id)``
+  helper centralises the default shape so producers and the transform
+  hook all access the same structure.
+- ``_capture_recall_count``, ``_capture_save_topic``, and
+  ``_do_indicator_transform`` all take ``session_id`` and read/write
+  the matching slot.
+- ``provider.prefetch`` passes ``self._session_id`` to the recall
+  capture; ``provider.sync_turn`` extracts ``session_id`` from kwargs
+  (with a fall-back to ``self._session_id``) and threads it through
+  ``hooks.submit_triggers``.
+- ``hooks.submit_triggers`` and ``hooks._submit_classify_task`` take
+  ``session_id`` and pass it to ``_capture_save_topic``.
+- ``classifier.ClassifyTask`` gains a ``session_id`` field so the
+  background classifier worker can stamp the right slot when its
+  classification eventually produces a save topic (it runs on a
+  daemon thread and only sees data baked onto the task at enqueue
+  time).
+
+Regression guard: ``tests/test_provider.py::
+test_indicator_state_per_session_no_contamination`` exercises the
+exact two-session interleave that bit the live deployment.
+
+### Changed
+
+- **``provider.initialize`` strips ICM's ``": N memories"`` suffix
+  from each topic name** before indexing them into the
+  ``topic_keyword_map``. Pre-v0.5.2 the suffixed string flowed into
+  the keyword index and ``-t <topic>`` filter; icm's substring match
+  accepted it but the ``inferred_topic='context-hair-iron: 3
+  memories'`` log line was ugly. Now it's clean and the ``-t`` filter
+  uses an exact topic-name match.
+
 ## [0.5.1] — 2026-05-17
 
 **Topic-aware recall — when the user's query overlaps a project topic

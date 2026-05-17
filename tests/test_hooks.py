@@ -1423,7 +1423,13 @@ def test_submit_triggers_classifier_path_routes_correctly(
         user_content: str,
         assistant_content: str,
         project: str | None,
+        *,
+        session_id: str = "",
     ) -> None:
+        # v0.5.2 — session_id kwarg added to plumb the per-session indicator
+        # state. Test ignores the value here (the actual capture is in
+        # _classifier_worker), just accepts it to match the new signature.
+        _ = session_id
         calls.append(f"classify:{user_content}:{assistant_content}:{project}")
 
     def fake_submit_periodic(
