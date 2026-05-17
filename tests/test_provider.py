@@ -372,49 +372,50 @@ def test_save_config_returns_error_dict_on_oserror(
 
 
 def test_indicator_directive_heartbeat_when_silent() -> None:
-    """Both counters empty → minimal heartbeat (📚 —) so user sees liveness."""
+    """v0.5.6 — heartbeat is now BOTH halves: '📚 — · 💾 —'."""
     out = IcmMemoryProvider._render_indicator_directive(0, None)
     assert "📚 —" in out
-    assert "💾" not in out
+    assert "💾 —" in out  # save half always present in v0.5.6
 
 
-def test_indicator_directive_recall_only() -> None:
-    """recall > 0, no save → footer shows count only."""
+def test_indicator_directive_mentions_recall_count_in_fixed_half() -> None:
+    """Directive shows the LLM the exact recall half to copy."""
     out = IcmMemoryProvider._render_indicator_directive(3, None)
     assert "📚 3" in out
-    assert "💾" not in out
 
 
-def test_indicator_directive_save_only() -> None:
-    """recall == 0, save present → footer shows save only (no zero-count noise)."""
+def test_indicator_directive_includes_save_topic_when_provided() -> None:
+    """When save_topic carried over from prior turn, it shows in the
+    default-footer hint at the bottom of the directive."""
     out = IcmMemoryProvider._render_indicator_directive(0, "errors-resolved-moon-backend")
     assert "💾 errors-resolved-moon-backend" in out
-    assert "📚" not in out
 
 
-def test_indicator_directive_both_with_separator() -> None:
-    """Both halves present → joined with the dot separator."""
-    out = IcmMemoryProvider._render_indicator_directive(2, "decisions-hermes")
-    assert "📚 2 · 💾 decisions-hermes" in out
+def test_indicator_directive_both_halves_addressed() -> None:
+    """Directive covers both halves: fixed recall (`📚 2 decisions-hermes`)
+    + auto-save instruction for the 💾 half."""
+    out = IcmMemoryProvider._render_indicator_directive(2, None, recall_topic="decisions-hermes")
+    assert "📚 2 decisions-hermes" in out
+    assert "mcp_icm_icm_memory_store" in out  # auto-save instruction present
 
 
 # ---------- v0.5.3: footer includes recall topic name ------------------------
 
 
 def test_indicator_footer_includes_recall_topic_when_provided() -> None:
-    """v0.5.3 — operator request: show the inferred topic next to 📚."""
+    """v0.5.3 — show inferred topic next to 📚. v0.5.6 — 💾 half always emitted."""
     from hermes_icm_memory import provider as _prov
 
     out = _prov._render_indicator_footer(3, None, recall_topic="context-hair-iron")
-    assert out == "📚 3 context-hair-iron"
+    assert out == "📚 3 context-hair-iron · 💾 —"
 
 
 def test_indicator_footer_omits_topic_when_not_provided() -> None:
-    """No recall_topic → bare ``📚 N`` (back-compat)."""
+    """No recall_topic → ``📚 N`` (no topic suffix). v0.5.6: 💾 — appended."""
     from hermes_icm_memory import provider as _prov
 
-    assert _prov._render_indicator_footer(3, None) == "📚 3"
-    assert _prov._render_indicator_footer(3, None, recall_topic=None) == "📚 3"
+    assert _prov._render_indicator_footer(3, None) == "📚 3 · 💾 —"
+    assert _prov._render_indicator_footer(3, None, recall_topic=None) == "📚 3 · 💾 —"
 
 
 def test_indicator_footer_topic_with_save() -> None:
@@ -427,20 +428,22 @@ def test_indicator_footer_topic_with_save() -> None:
     assert out == "📚 5 context-hair-iron · 💾 errors-resolved-foo"
 
 
-def test_indicator_footer_heartbeat_unchanged() -> None:
-    """No recall, no save → still ``📚 —`` regardless of topic param."""
+def test_indicator_footer_heartbeat_both_halves() -> None:
+    """v0.5.6 — full heartbeat shows BOTH halves: '📚 — · 💾 —'."""
     from hermes_icm_memory import provider as _prov
 
-    assert _prov._render_indicator_footer(0, None) == "📚 —"
+    assert _prov._render_indicator_footer(0, None) == "📚 — · 💾 —"
     assert _prov._render_indicator_footer(
         0, None, recall_topic="context-hair-iron",
-    ) == "📚 —"
+    ) == "📚 — · 💾 —"
 
 
 def test_indicator_transform_emits_topic_in_footer(
     reset_indicator_state: None,  # noqa: ARG001
 ) -> None:
-    """End-to-end: when prefetch captures a topic, transform shows it."""
+    """End-to-end: when prefetch captures a topic AND model doesn't emit a
+    well-formed footer, transform appends the canonical one (with both
+    halves)."""
     from hermes_icm_memory import provider as _prov
 
     _prov._capture_recall_count(
@@ -448,18 +451,19 @@ def test_indicator_transform_emits_topic_in_footer(
     )
     out = _prov._do_indicator_transform(response_text="hello", session_id="s1")
     assert out is not None
-    assert out.endswith("📚 4 context-hair-iron")
+    assert out.endswith("📚 4 context-hair-iron · 💾 —")
 
 
 def test_indicator_directive_instructs_verbatim_echo() -> None:
-    """Directive text must instruct the LLM to copy the footer literally —
-    the directive is the v0.4.3 fallback when transform_llm_output isn't
-    wired (e.g. streamed partials). Strengthened wording adopted in v0.4.3."""
+    """Directive must instruct the LLM to emit the footer verbatim and
+    to auto-save (v0.5.6) when appropriate."""
     out = IcmMemoryProvider._render_indicator_directive(1, "context-hermes-chat")
-    # Stronger v0.4.3 wording must be present.
     assert "MANDATORY" in out
-    assert "copied character-for-character" in out
+    assert "character-for-character" in out
     assert "non-negotiable" in out
+    # v0.5.6 — auto-save instruction added.
+    assert "mcp_icm_icm_memory_store" in out
+    assert "📚" in out and "💾" in out
 
 
 def test_system_prompt_block_appends_indicator_and_resets_recall_count() -> None:
@@ -509,7 +513,7 @@ def reset_indicator_state() -> Any:
 
 
 def test_indicator_transform_appends_footer(reset_indicator_state: None) -> None:  # noqa: ARG001
-    """Hook appends `📚 N · 💾 topic` to a reply that doesn't already have it."""
+    """Hook appends canonical footer (both halves) when model didn't emit one."""
     from hermes_icm_memory import provider as _prov
 
     _prov._capture_recall_count(2)
@@ -522,48 +526,50 @@ def test_indicator_transform_appends_footer(reset_indicator_state: None) -> None
 
 
 def test_indicator_transform_heartbeat_when_silent(reset_indicator_state: None) -> None:  # noqa: ARG001
-    """No captured recall/save → heartbeat footer (📚 —) still appended."""
+    """No captured recall/save → heartbeat with both halves appended."""
     from hermes_icm_memory import provider as _prov
 
     out = _prov._do_indicator_transform(response_text="ok")
     assert out is not None
-    assert out.endswith("📚 —")
+    assert out.endswith("📚 — · 💾 —")
 
 
-def test_indicator_transform_strips_stale_footer_and_replaces(
+def test_indicator_transform_replaces_malformed_footer(
     reset_indicator_state: None,  # noqa: ARG001
 ) -> None:
-    """v0.4.6 — hook is the single source of truth for the footer. Any
-    pre-existing ``📚 …`` trailing line (often a stale ``📚 —`` heartbeat
-    the model copied from the system_prompt_block directive that rendered
-    BEFORE prefetch populated state) gets stripped before the fresh
-    footer is appended."""
+    """v0.5.6 — hook trusts WELL-FORMED footers (📚 ... · 💾 ...) the
+    model emits, but replaces malformed ones (📚 alone, stale heartbeat
+    without 💾, etc.) with the canonical plugin-state footer."""
     from hermes_icm_memory import provider as _prov
 
     _prov._capture_recall_count(3)
-    # Model copied the directive's stale heartbeat while real recall was 3.
+    # Model emitted half-footer (only 📚 — no 💾 half). Not well-formed.
     response = "Here is my answer.\n\n📚 —"
     out = _prov._do_indicator_transform(response_text=response)
     assert out is not None
-    # Stale heartbeat is gone; fresh footer wins.
+    # Stale half-footer stripped; canonical two-half footer appended.
     assert out.count("📚") == 1
-    assert out.endswith("📚 3")
+    assert out.endswith("📚 3 · 💾 —")
     assert out.startswith("Here is my answer.")
 
 
-def test_indicator_transform_strips_exact_match_too(
+def test_indicator_transform_trusts_well_formed_footer(
     reset_indicator_state: None,  # noqa: ARG001
 ) -> None:
-    """Even when the stale and fresh footers match, the hook still owns
-    the output: strip + append produces exactly one footer (no double)."""
+    """v0.5.6 — when model emits ``📚 ... · 💾 ...`` matching the
+    expected format, hook returns None (leave response unchanged). The
+    💾 half is the model's authoritative save self-report and must not
+    be overwritten by plugin-state heartbeat."""
     from hermes_icm_memory import provider as _prov
 
-    _prov._capture_recall_count(3)
-    response = "Here is my answer.\n\n📚 3"
+    _prov._capture_recall_count(3)  # plugin state has no save_topic
+    # Model emitted a full footer including its own save self-report.
+    response = "Here is my answer.\n\n📚 3 · 💾 errors-resolved-foo"
     out = _prov._do_indicator_transform(response_text=response)
-    assert out is not None
-    assert out.count("📚") == 1
-    assert out.endswith("📚 3")
+    assert out is None, (
+        "well-formed footer with model-emitted 💾 must be preserved verbatim "
+        "(plugin doesn't intercept the tool call to verify, so we trust the model's report)"
+    )
 
 
 def test_indicator_transform_returns_none_on_empty_text(
@@ -615,13 +621,14 @@ def test_indicator_state_per_session_no_contamination(
     )
     assert out_a is not None and "📚 3 · 💾 learnings-hair-iron" in out_a
     assert out_b is not None and "📚 10" in out_b
-    assert "💾" not in out_b, "session B never captured a save topic"
+    # v0.5.6 — 💾 — heartbeat always present, even when no save captured.
+    assert out_b.endswith("📚 10 · 💾 —"), "session B never captured a save → heartbeat"
 
     # Both slots are reset after their respective transforms.
     out_a2 = _prov._do_indicator_transform(
         response_text="next reply A", session_id="session-A",
     )
-    assert out_a2 is not None and out_a2.endswith("📚 —")
+    assert out_a2 is not None and out_a2.endswith("📚 — · 💾 —")
 
 
 def test_capture_save_topic_ignores_empty_topic(

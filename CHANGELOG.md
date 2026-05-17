@@ -5,6 +5,60 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.6] — 2026-05-17
+
+**Auto-save via LLM tool call + footer always shows both halves.**
+
+### Why
+
+The classifier-based auto-save (added in v0.4 series) was not firing
+reliably — async LLM call to classify each turn was either being
+skipped or returning unactionable results, so the ``💾`` half of the
+footer was almost always empty. Per the operator's suggestion, shift
+the save decision from an async classifier to the SAME LLM that's
+already producing the response. It already has access to the
+``mcp_icm_*`` tools, so it can call ``mcp_icm_icm_memory_store``
+directly when an exchange is worth remembering and self-report what
+it saved in the footer's ``💾`` half. No new plugin path needed —
+piggybacks on the v0.5.5 per-turn directive injection.
+
+### Changed
+
+- **``_render_indicator_footer`` always emits BOTH halves** —
+  ``📚 <recall> · 💾 <save>``. Heartbeat is now ``📚 — · 💾 —``
+  (operator request: per-turn liveness for the save side too, not
+  just recall). Single-half formats from v0.5.3 are gone.
+- **``_render_indicator_directive`` extended with auto-save block.**
+  Tells the LLM: decide if the exchange is worth remembering (list of
+  triggers: preferences, errors, decisions, learnings, gotchas,
+  context); if yes, call ``mcp_icm_icm_memory_store(topic, content,
+  importance)`` then put the topic in the footer's ``💾`` slot; if
+  no, emit ``💾 —``. Topic format: free-form kebab-case (LLM picks —
+  operator chose 2026-05-17 not to constrain to a vocabulary that may
+  not cover novel exchanges).
+- **``_do_indicator_transform`` trusts well-formed model footers.**
+  If the model emits a footer matching ``📚 … · 💾 …``, the hook
+  returns ``None`` (leaves response unchanged) — the ``💾`` half is
+  the model's authoritative save self-report and the plugin doesn't
+  intercept the tool call to verify it. The hook still replaces stale
+  half-footers and silent-turn omissions with the canonical
+  plugin-state heartbeat. New ``_WELL_FORMED_FOOTER_RE`` matches the
+  full ``📚 ... · 💾 ...`` shape.
+- **v0.5.4 INFO log gains a ``model_complied=`` field** so operators
+  can see at a glance whether the model followed the directive
+  format this turn.
+
+### Verified end-to-end
+
+Interactive CLI in tmux: query ``"i decided to always use bun not
+npm remember this"`` →
+- Model called ``mcp_icm_icm_memory_store`` (visible in TUI tool-call
+  bubble)
+- Reply ended with ``📚 10 · 💾 preferences``
+- ``icm recall`` confirms the new ``preferences`` entry is in the DB
+  (ULID ``01KRV4YT0M...``)
+- Hook log: ``model_complied=True``
+
 ## [0.5.5] — 2026-05-17
 
 **Indicator footer now appears in streamed clients (TUI / Telegram) —

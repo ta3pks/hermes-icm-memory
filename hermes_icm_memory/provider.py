@@ -113,39 +113,39 @@ def _render_indicator_footer(
 ) -> str:
     """Build the literal footer line the user sees at the bottom of replies.
 
-    Format:
-        ``📚 N <topic>``           — recall fired, topic inferred
-        ``📚 N``                   — recall fired, no topic inferred
-        ``📚 N <topic> · 💾 <save>``  — both halves
-        ``💾 <save>``              — save only, no recall
-        ``📚 —``                  — heartbeat (nothing fired) — always shown
-                                    on silent turns so the user has a per-
-                                    turn liveness signal.
+    v0.5.6 — ALWAYS emits both ``📚`` and ``💾`` halves so the save side
+    has the same per-turn liveness signal as the recall side. Format:
+
+        ``📚 N <topic> · 💾 <save>``  — recall hit with topic + save made
+        ``📚 N <topic> · 💾 —``       — recall hit with topic, no save
+        ``📚 N · 💾 <save>``          — recall hit, no topic, save made
+        ``📚 N · 💾 —``               — recall hit, no topic, no save
+        ``📚 — · 💾 <save>``          — save only (no recall hits)
+        ``📚 — · 💾 —``               — full heartbeat (nothing fired)
     """
-    parts: list[str] = []
     if recall > 0:
-        if recall_topic:
-            parts.append(f"📚 {recall} {recall_topic}")
-        else:
-            parts.append(f"📚 {recall}")
-    if save:
-        parts.append(f"💾 {save}")
-    return " · ".join(parts) if parts else "📚 —"
+        recall_part = f"📚 {recall} {recall_topic}" if recall_topic else f"📚 {recall}"
+    else:
+        recall_part = "📚 —"
+    save_part = f"💾 {save}" if save else "💾 —"
+    return f"{recall_part} · {save_part}"
 
 
 #: Matches a single-line indicator footer the model (or this hook) may have
 #: previously appended — used by :func:`_do_indicator_transform` to strip
 #: any stale instance before appending the freshly-rendered one.
-#:
-#: v0.4.6 — the v0.4.5 exact-match de-dupe was insufficient because the
-#: ``system_prompt_block`` directive renders BEFORE prefetch fires, so the
-#: model copies a ``📚 —`` heartbeat into its reply while the hook (which
-#: runs AFTER prefetch) sees the real ``📚 N`` count. Exact-match doesn't
-#: catch the mismatch — both footers end up in the reply. Switching the
-#: hook to be the single source of truth (strip-then-append) fixes that
-#: AND demotes the fallback directive to a no-op when the hook is wired.
 _FOOTER_LINE_RE: Final[re.Pattern[str]] = re.compile(
     r"\n*📚[^\n]*$",
+)
+
+#: v0.5.6 — a "well-formed" footer the model emitted in response to the
+#: auto-save directive. Format: ``📚 <recall> · 💾 <save>``. When the
+#: model emits something matching this shape, :func:`_do_indicator_transform`
+#: trusts it (the ``💾`` half is the model's authoritative report of what
+#: it chose to save). Otherwise the hook strips whatever ``📚`` line was
+#: there and appends a heartbeat constructed from plugin state.
+_WELL_FORMED_FOOTER_RE: Final[re.Pattern[str]] = re.compile(
+    r"\n*📚[^\n·]*·[^\n]*💾[^\n]*$",
 )
 
 
@@ -173,17 +173,27 @@ def _do_indicator_transform(
     # session_id Hermes passes here matches the session_id provider.prefetch
     # used to write the slot. A footer mismatch with the prefetch log was
     # otherwise indistinguishable from "hook silently never fired".
+    model_complied = bool(_WELL_FORMED_FOOTER_RE.search(response_text))
     logger.info(
         "transform_llm_output: session_id=%r known_slots=%d "
-        "snapshot=(recall=%d, topic=%r, save=%r)",
+        "snapshot=(recall=%d, topic=%r, save=%r) model_complied=%s",
         session_id, len(_INDICATOR_STATE),
-        snapshot_recall, snapshot_recall_topic, snapshot_save,
+        snapshot_recall, snapshot_recall_topic, snapshot_save, model_complied,
     )
     # Reset THIS session's slot before formatting so the next-turn snapshot
     # starts clean even if the format step raises.
     slot["recall_count"] = 0
     slot["last_save_topic"] = None
     slot["recall_topic"] = None
+    # v0.5.6 — if the model emitted a well-formed footer in response to the
+    # auto-save directive, TRUST IT. The 💾 half is the model's
+    # authoritative report of whether it called the icm-store tool and
+    # what topic it used (we don't intercept the tool call from inside
+    # the plugin). Stripping + re-appending here would clobber that
+    # information. Only fall back to the plugin-state heartbeat when the
+    # model didn't comply with the format.
+    if model_complied:
+        return None  # leave response_text unchanged
     footer = _render_indicator_footer(
         snapshot_recall, snapshot_save, recall_topic=snapshot_recall_topic,
     )
@@ -844,32 +854,75 @@ class IcmMemoryProvider:
         *,
         recall_topic: str | None = None,
     ) -> str:
-        """Build the literal indicator block the LLM is asked to echo verbatim.
+        """Build the indicator-block + auto-save directive (v0.5.6).
 
-        v0.5.5 — also takes ``recall_topic`` so the directive reflects the
-        per-turn topic detection. v0.4.3 — fallback / streaming path. The
-        ``transform_llm_output`` hook runs AFTER streaming has already
-        rendered the response in the TUI / Telegram client, so the only
-        way to get a CORRECT per-turn footer into the streamed text is
-        for the model to emit it. The directive (injected fresh per turn
-        via :meth:`prefetch`'s return value in v0.5.5) tells the model
-        what to print; the hook still runs at the end to ensure the
-        final ``final_response`` carries the same canonical footer
-        regardless of model compliance.
+        Two responsibilities in one block, injected per-turn via
+        :meth:`prefetch` so the model sees a fresh copy each turn:
+
+        1. **Indicator footer.** Tells the model the exact recall half
+           (``📚 N <topic>`` / ``📚 —``) and asks it to echo the full
+           footer at the end of its reply. The model fills in the
+           ``💾`` half based on its own save decision (next bullet).
+
+        2. **Auto-save.** Asks the model to decide whether this exchange
+           is worth remembering long-term; if so, call
+           ``mcp_icm_icm_memory_store`` with a free-form topic of its
+           choice, then put the saved topic in the footer's ``💾`` slot.
+           Free-form topic naming is the operator's call (2026-05-17) —
+           rationale: existing topic-name discipline came from the
+           operator hand-curating; auto-save should not be constrained
+           to a vocabulary that may not cover novel exchanges.
+
+        The ``transform_llm_output`` hook (v0.5.6) trusts a
+        well-formed footer when the model emits one; only falls back to
+        replacing it when the model omits or malforms the footer.
         """
-        footer = _render_indicator_footer(
-            recall_count, save_topic, recall_topic=recall_topic,
+        recall_half = (
+            f"📚 {recall_count} {recall_topic}" if recall_count > 0 and recall_topic
+            else (f"📚 {recall_count}" if recall_count > 0 else "📚 —")
         )
+        save_half_placeholder = f"💾 {save_topic}" if save_topic else "💾 —"
         return (
             "════════════════════════════════════════════════════════════════\n"
             "MANDATORY OUTPUT FORMAT — MEMORY INDICATOR FOOTER\n"
             "════════════════════════════════════════════════════════════════\n"
-            "Your reply MUST end with the following line on its own line, "
-            "copied character-for-character (no paraphrase, no translation, "
-            "no extra formatting, no surrounding code fence):\n"
-            f"\n    {footer}\n\n"
-            "This is non-negotiable. If you omit this footer the user "
-            "loses their memory-system liveness signal."
+            "Your reply MUST end with a SINGLE line on its own line in this\n"
+            "exact format (no paraphrase, no translation, no code fence):\n"
+            "\n"
+            "    📚 <recall-half> · 💾 <save-half>\n"
+            "\n"
+            f"For THIS turn the recall half is fixed at: `{recall_half}`\n"
+            "— copy that part character-for-character.\n"
+            "\n"
+            "────────────────────────────────────────────────────────────────\n"
+            "AUTO-SAVE TO ICM (decides the 💾 half)\n"
+            "────────────────────────────────────────────────────────────────\n"
+            "Before writing the footer, decide if this exchange is worth\n"
+            "remembering long-term. Save when ANY of these apply:\n"
+            "  • A user preference, instruction, or constraint stated\n"
+            "  • An error / issue resolved with a non-obvious root cause\n"
+            "  • An architectural or design decision\n"
+            "  • A learning / insight worth future-self knowing\n"
+            "  • A gotcha worth warning future-self about\n"
+            "  • A project status update worth resuming from later\n"
+            "\n"
+            "If you decide to save: call\n"
+            "  mcp_icm_icm_memory_store(\n"
+            "    topic='<your-chosen-topic-slug>',\n"
+            "    content='<concise summary, <=400 chars>',\n"
+            "    importance='critical'|'high'|'medium'|'low')\n"
+            "Topic format: kebab-case, free-form — pick whatever names this\n"
+            "exchange best (e.g. errors-resolved-foo, decisions-bar,\n"
+            "preferences-baz, learnings-quux). After the tool call returns,\n"
+            f"set the footer's 💾 half to the topic you used: `💾 <your-topic>`.\n"
+            "\n"
+            "If you decide NOT to save: skip the tool call and use the\n"
+            "literal placeholder: `💾 —` (em dash, U+2014).\n"
+            "\n"
+            "────────────────────────────────────────────────────────────────\n"
+            f"Default footer if you skip the save: `{recall_half} · {save_half_placeholder}`\n"
+            "This footer is non-negotiable. Omitting it loses the user's\n"
+            "memory-system liveness signal."
         )
 
     # ------------------------------------------------------------------ sync_turn
