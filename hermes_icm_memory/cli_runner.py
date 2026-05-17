@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import json
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from . import mcp_client
-from .errors import ICMConnectionError, ICMNotFoundError
+from .errors import ICMConnectionError, ICMNotFoundError, ICMTimeoutError
 
 __all__ = [
     "mcp_start",
@@ -131,21 +133,69 @@ def _get_client() -> mcp_client.IcmMcpClient:
 def run_recall(
     query: str,
     limit: int,
-    db_path: Path | None,  # noqa: ARG001 — kept for API compat; MCP owns its DB path
-    timeout_ms: int,  # noqa: ARG001 — MCP has its own timeout; kept for API compat
+    db_path: Path | None,
+    timeout_ms: int,
     *,
-    use_embeddings: bool = True,  # noqa: ARG001 — kept for API compat
+    use_embeddings: bool = True,
     topic: str | None = None,
-    project: str | None = None,
+    project: str | None = None,  # noqa: ARG001 — icm CLI has no --project flag
 ) -> list[dict[str, Any]]:
-    """Run ``icm recall`` via the MCP daemon and return the parsed list of hits.
+    """Run ``icm recall`` via a one-shot CLI subprocess (v0.5.0).
 
-    ``db_path``, ``timeout_ms``, and ``use_embeddings`` are accepted for API
-    compatibility with v0.3 callers but are managed by the MCP daemon's startup
-    config.
+    v0.4 routed recall through the warm MCP daemon for speed (~10ms/call vs
+    ~150ms cold subprocess). v0.5.0 reverts to subprocess because ICM's
+    MCP-served recall ranker surfaces empty-topic memoir entries above
+    topic-tagged memories — the CLI ranker behaves correctly on the same
+    data. Speed cost is real (subprocess startup) but correctness wins.
+
+    Store / topics / health calls still go through the warm MCP daemon —
+    only recall is broken upstream.
+
+    Returns the parsed list of memory dicts; empty list on no-results or
+    on any failure that doesn't deserve raising.
     """
-    cl = _get_client()
-    return cl.call_recall(query=query, limit=limit, topic=topic, project=project)
+    argv: list[str] = ["icm"]
+    if not use_embeddings:
+        # Global flag MUST precede the subcommand per icm's clap parser.
+        argv.append("--no-embeddings")
+    argv += ["recall", query, "--limit", str(limit), "--format", "json"]
+    if topic:
+        argv += ["-t", topic]
+    if db_path is not None:
+        argv += ["--db", str(db_path)]
+
+    try:
+        result = subprocess.run(  # noqa: S603 — argv is list, no shell, AD-19 safe
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=max(timeout_ms, 1) / 1000.0,
+        )
+    except FileNotFoundError as exc:
+        raise ICMNotFoundError(f"icm binary not found on PATH: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ICMTimeoutError(f"icm recall timed out after {timeout_ms}ms") from exc
+
+    if result.returncode != 0:
+        raise ICMConnectionError(
+            f"icm recall exit {result.returncode}: {result.stderr.strip()[:200]}"
+        )
+
+    stdout = result.stdout.strip()
+    if not stdout:
+        return []
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        # icm prints a plain "No memories found." sentinel for empty queries
+        # under some build flavours — treat as zero hits, not a crash.
+        return []
+    if not isinstance(parsed, list):
+        return []
+    # Defensive: ensure each entry is a dict (icm should always return that
+    # shape under --format json, but a future schema change shouldn't crash
+    # the caller).
+    return [h for h in parsed if isinstance(h, dict)]
 
 
 def run_store(

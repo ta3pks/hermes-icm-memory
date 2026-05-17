@@ -58,12 +58,20 @@ def test_cli_runner_all_exports_mcp_lifecycle() -> None:
     assert "run_health" in exported
 
 
-def test_cli_runner_source_has_no_direct_subprocess_call() -> None:
-    """v0.4 — cli_runner source contains no direct ``subprocess.`` calls.
+def test_cli_runner_subprocess_use_is_scoped_to_recall() -> None:
+    """v0.5.0 — cli_runner.run_recall calls subprocess.run directly; the
+    other public helpers (run_store/topics/health) still delegate to the
+    warm MCP daemon. v0.4 banned subprocess from cli_runner entirely, but
+    ICM's MCP-served recall ranker surfaces empty-topic memoir blobs above
+    topic-tagged memories (the CLI ranker is correct), so recall was
+    reverted to the subprocess path.
 
-    All subprocess invocations live in ``mcp_client.py``.
+    Pin the scope: subprocess.run must appear EXACTLY ONCE in cli_runner.py.
+    If a future change broadens subprocess use back to store/topics/health,
+    that's a deliberate decision that should update this test consciously.
     """
     source = Path(cli_runner.__file__).read_text(encoding="utf-8")
-    assert "subprocess." not in source, (
-        "cli_runner.py must not call subprocess directly in v0.4"
+    assert source.count("subprocess.run(") == 1, (
+        "expected exactly one subprocess.run call in cli_runner "
+        f"(in run_recall); found {source.count('subprocess.run(')}"
     )

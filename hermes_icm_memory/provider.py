@@ -32,7 +32,7 @@ from typing import Any, Final
 
 import yaml
 
-from . import cli_runner, config, hooks, mapping
+from . import cli_runner, config, hooks
 
 __all__ = ["IcmMemoryProvider"]
 
@@ -586,16 +586,12 @@ class IcmMemoryProvider:
         if not self.is_available():
             return ""
         recall_limit = self._config_int("recall_limit")
-        # v0.4.8 — pre-process the natural-language user message into a
-        # keyword-only query before calling ICM. ICM's MCP recall ranker
-        # behaves poorly on full-sentence input (a query like "what's the
-        # state of hair iron" returns a single unrelated ``preferences``
-        # blob, while "hair iron" returns the relevant entries). Stripping
-        # stopwords/short tokens client-side dramatically improves hit
-        # ranking on Pi-class hosts that run icm with ``--no-embeddings``.
-        # Falls back to the original on empty extraction (see
-        # ``mapping.extract_recall_query`` docstring).
-        recall_query = mapping.extract_recall_query(query)
+        # v0.5.0 — stopword stripping (added in v0.4.8 as a workaround for
+        # ICM's MCP-recall ranker preferring memoir blobs over topic-
+        # tagged memories) is no longer needed: ``cli_runner.run_recall``
+        # now uses the icm CLI subprocess, whose ranker handles
+        # full-sentence queries correctly. We send the user's raw message.
+        recall_query = query
         # v0.1.1: ``_db_path is None`` is a legitimate "use icm canonical
         # default DB" sentinel (default-shared mode), not a "not initialized"
         # signal. The ``_init_args`` check upstream handles the latter.

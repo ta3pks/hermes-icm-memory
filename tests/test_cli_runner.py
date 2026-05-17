@@ -66,51 +66,137 @@ def test_mcp_stop_is_noop_when_not_started() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Delegation — run_recall
+# Delegation — run_recall (v0.5.0: subprocess, not MCP)
 # ---------------------------------------------------------------------------
+#
+# v0.5.0 routes run_recall through `icm recall ... --format json` as a
+# one-shot subprocess (ICM's MCP-recall ranker surfaces noise above
+# topic-tagged memories; the CLI ranker behaves correctly). Tests mock
+# subprocess.run to verify argv composition and output parsing.
 
 
 def _with_client() -> MagicMock:
-    """Set up a mock MCP client on cli_runner."""
+    """Set up a mock MCP client on cli_runner (for store/topics/health tests)."""
     client = MagicMock()
     client.is_available.return_value = True
     cli_runner._client = client
     return client
 
 
-def test_run_recall_delegates_to_mcp_client() -> None:
-    client = _with_client()
-    client.call_recall.return_value = [{"topic": "test", "summary": "hello"}]
-
-    result = cli_runner.run_recall(
-        query="hello", limit=5, db_path=DB, timeout_ms=2000
-    )
-    assert result == [{"topic": "test", "summary": "hello"}]
-    client.call_recall.assert_called_once_with(
-        query="hello", limit=5, topic=None, project=None
-    )
-    cli_runner.mcp_stop()
+def _fake_subprocess_run(stdout: str = "[]", returncode: int = 0) -> MagicMock:
+    """Build a CompletedProcess-like stub for subprocess.run."""
+    result = MagicMock()
+    result.stdout = stdout
+    result.stderr = ""
+    result.returncode = returncode
+    return result
 
 
-def test_run_recall_with_topic_and_project() -> None:
-    client = _with_client()
-    client.call_recall.return_value = []
+def test_run_recall_invokes_icm_cli_with_json_format() -> None:
+    """v0.5.0 — recall spawns ``icm recall <q> --limit N --format json``."""
+    with patch("hermes_icm_memory.cli_runner.subprocess.run") as mock_run:
+        mock_run.return_value = _fake_subprocess_run(
+            stdout='[{"id": "m1", "topic": "context-x", "summary": "hello"}]',
+        )
+        result = cli_runner.run_recall(
+            query="hello", limit=5, db_path=DB, timeout_ms=2000,
+        )
+        assert result == [{"id": "m1", "topic": "context-x", "summary": "hello"}]
+        # Verify argv shape.
+        (called_argv, *_), kwargs = mock_run.call_args
+        assert called_argv[0] == "icm"
+        assert "recall" in called_argv
+        assert "hello" in called_argv
+        assert "--format" in called_argv
+        assert "json" in called_argv
+        assert "--limit" in called_argv
+        assert "5" in called_argv
+        # use_embeddings defaults True → no --no-embeddings flag.
+        assert "--no-embeddings" not in called_argv
+        # db_path threaded through.
+        assert "--db" in called_argv
+        assert str(DB) in called_argv
 
-    cli_runner.run_recall(
-        query="q",
-        limit=3,
-        db_path=DB,
-        timeout_ms=2000,
-        topic="errors-resolved",
-        project="hermes-icm-memory",
-    )
-    client.call_recall.assert_called_once_with(
-        query="q",
-        limit=3,
-        topic="errors-resolved",
-        project="hermes-icm-memory",
-    )
-    cli_runner.mcp_stop()
+
+def test_run_recall_no_embeddings_flag_threads_to_cli() -> None:
+    """``use_embeddings=False`` adds ``--no-embeddings`` BEFORE the subcommand."""
+    with patch("hermes_icm_memory.cli_runner.subprocess.run") as mock_run:
+        mock_run.return_value = _fake_subprocess_run()
+        cli_runner.run_recall(
+            query="q", limit=3, db_path=DB, timeout_ms=2000,
+            use_embeddings=False,
+        )
+        argv = mock_run.call_args[0][0]
+        # icm clap parser: global --no-embeddings must precede subcommand.
+        assert argv.index("--no-embeddings") < argv.index("recall")
+
+
+def test_run_recall_topic_filter_threads_to_cli() -> None:
+    """``topic=X`` adds ``-t X`` (project is silently dropped — icm CLI has
+    no --project flag and the existing API kept it for back-compat)."""
+    with patch("hermes_icm_memory.cli_runner.subprocess.run") as mock_run:
+        mock_run.return_value = _fake_subprocess_run()
+        cli_runner.run_recall(
+            query="q", limit=3, db_path=DB, timeout_ms=2000,
+            topic="context-hair-iron", project="hermes-icm-memory",
+        )
+        argv = mock_run.call_args[0][0]
+        assert "-t" in argv
+        assert "context-hair-iron" in argv
+        assert "--project" not in argv  # icm CLI has no such flag
+
+
+def test_run_recall_empty_stdout_returns_empty_list() -> None:
+    """Empty stdout → [] (not a crash)."""
+    with patch("hermes_icm_memory.cli_runner.subprocess.run") as mock_run:
+        mock_run.return_value = _fake_subprocess_run(stdout="")
+        assert cli_runner.run_recall(query="q", limit=3, db_path=DB, timeout_ms=2000) == []
+
+
+def test_run_recall_unparseable_stdout_returns_empty_list() -> None:
+    """Non-JSON stdout (e.g. icm's "No memories found." sentinel under some
+    build flavours) is treated as zero hits, not a crash."""
+    with patch("hermes_icm_memory.cli_runner.subprocess.run") as mock_run:
+        mock_run.return_value = _fake_subprocess_run(stdout="No memories found.")
+        assert cli_runner.run_recall(query="q", limit=3, db_path=DB, timeout_ms=2000) == []
+
+
+def test_run_recall_non_zero_exit_raises_connection_error() -> None:
+    """Non-zero exit code surfaces as ICMConnectionError with stderr context."""
+    with patch("hermes_icm_memory.cli_runner.subprocess.run") as mock_run:
+        result = _fake_subprocess_run(returncode=1)
+        result.stderr = "icm: database is locked"
+        mock_run.return_value = result
+        with pytest.raises(cli_runner.ICMConnectionError, match="database is locked"):
+            cli_runner.run_recall(query="q", limit=3, db_path=DB, timeout_ms=2000)
+
+
+def test_run_recall_timeout_raises_timeout_error() -> None:
+    """subprocess.TimeoutExpired surfaces as ICMTimeoutError."""
+    import subprocess as _sp
+    with patch("hermes_icm_memory.cli_runner.subprocess.run") as mock_run:
+        mock_run.side_effect = _sp.TimeoutExpired(cmd="icm", timeout=2.0)
+        from hermes_icm_memory.errors import ICMTimeoutError
+        with pytest.raises(ICMTimeoutError):
+            cli_runner.run_recall(query="q", limit=3, db_path=DB, timeout_ms=2000)
+
+
+def test_run_recall_missing_binary_raises_not_found() -> None:
+    """FileNotFoundError (icm binary missing) surfaces as ICMNotFoundError."""
+    with patch("hermes_icm_memory.cli_runner.subprocess.run") as mock_run:
+        mock_run.side_effect = FileNotFoundError("icm")
+        with pytest.raises(ICMNotFoundError):
+            cli_runner.run_recall(query="q", limit=3, db_path=DB, timeout_ms=2000)
+
+
+def test_run_recall_does_not_require_mcp_client() -> None:
+    """v0.5.0 — recall is CLI-only now, so a missing _client is fine."""
+    cli_runner._client = None
+    with patch("hermes_icm_memory.cli_runner.subprocess.run") as mock_run:
+        mock_run.return_value = _fake_subprocess_run()
+        # Must not raise ICMConnectionError("MCP client not started ...").
+        result = cli_runner.run_recall(query="q", limit=3, db_path=DB, timeout_ms=2000)
+        assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -177,13 +263,6 @@ def test_run_health_delegates() -> None:
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
-
-
-def test_run_recall_when_not_started() -> None:
-    """run_recall raises ICMConnectionError when client not started."""
-    cli_runner._client = None
-    with pytest.raises(cli_runner.ICMConnectionError):
-        cli_runner.run_recall(query="q", limit=5, db_path=DB, timeout_ms=2000)
 
 
 def test_run_store_fails_raises() -> None:

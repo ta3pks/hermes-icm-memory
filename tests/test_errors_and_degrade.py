@@ -150,10 +150,21 @@ def test_mode5_happy_path(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Mode 5 — happy path returns a formatted prefetch block."""
+    """Mode 5 — happy path returns a formatted prefetch block.
+
+    v0.5.0 — recall now goes through a subprocess CLI call, not the MCP
+    client. Mock ``subprocess.run`` in cli_runner accordingly.
+    """
+    import json as _json
+    from unittest.mock import MagicMock as _MM
     hits = [{"topic": "preferences", "summary": "use bun"}]
-    client = _make_mock_client(call_recall_return=hits)
-    monkeypatch.setattr(cli_runner, "_client", client)
+    fake = _MM()
+    fake.returncode = 0
+    fake.stdout = _json.dumps(hits)
+    fake.stderr = ""
+    monkeypatch.setattr(
+        "hermes_icm_memory.cli_runner.subprocess.run", lambda *a, **kw: fake,
+    )
 
     with caplog.at_level(logging.DEBUG):
         block = initialized_provider.prefetch(query="anything")

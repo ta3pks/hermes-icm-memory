@@ -5,6 +5,62 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-05-17
+
+**Recall correctness — route ``run_recall`` through the ``icm`` CLI
+subprocess instead of the warm MCP daemon (partial revert of v0.4
+transport change).**
+
+### Why
+
+The v0.4.x → v0.4.8 investigation surfaced an ICM-side ranking bug:
+the MCP-served recall path consistently ranks empty-topic memoir
+entries and large consolidated ``context-nikos`` blobs ABOVE
+topic-tagged memories (``context-hair-iron``, ``learnings-bmad``,
+etc.). The CLI path on the same data ranks correctly — running
+``icm --no-embeddings recall "hair iron"`` returns five
+``context-hair-iron`` entries up top, while the plugin's MCP-based
+recall returns 46 hits with all empty-topic memoirs above any
+topic-tagged hair-iron memory. The plugin can't fix the upstream
+ranker, but it can route around it. v0.4.8's stopword-stripping
+workaround helped raw_hits jump from 1 → 17 but didn't address the
+underlying ranking problem. v0.5.0 fixes it at the transport layer.
+
+### Changed
+
+- **``cli_runner.run_recall``** now spawns ``icm recall <query>
+  --format json --limit N`` (plus ``--no-embeddings`` / ``-t topic`` /
+  ``--db PATH`` when those apply) as a one-shot subprocess and parses
+  the JSON output, instead of calling the MCP client's
+  ``call_recall``. Speed cost vs MCP: ~150ms cold subprocess vs ~10ms
+  warm MCP call. Correctness wins.
+- **``cli_runner`` imports ``subprocess`` directly** for this one
+  call. The existing ``tests/test_no_subprocess_outside_cli_runner.py``
+  AST guard already allowed both ``cli_runner.py`` and
+  ``mcp_client.py``; an additional pin
+  (``test_cli_runner_subprocess_use_is_scoped_to_recall``) asserts
+  there's exactly ONE ``subprocess.run(`` call in cli_runner so a
+  future broadening of subprocess use back into store/topics/health
+  is a deliberate decision, not accidental.
+- **``provider.prefetch`` no longer pre-strips stopwords** from the
+  query. The v0.4.8 stopword-stripping was a workaround for the
+  MCP-recall ranker's misbehaviour on full-sentence input; the CLI
+  ranker handles natural-language queries correctly. The
+  ``mapping.extract_recall_query`` helper stays in the codebase
+  (still useful for future opt-in use) but is no longer called.
+- **``cli_runner.run_recall`` no longer requires the MCP daemon to
+  be running.** Store / topics / health still use the warm MCP daemon
+  (those paths aren't affected by the recall-ranking bug).
+
+### Operational notes
+
+- **Per-turn recall latency increases** by the icm-binary subprocess
+  startup cost (~100-300ms on Pi 4, sub-100ms on Fedora). If recall
+  cold-start ever becomes a bottleneck, a forked subprocess pool is
+  the natural next optimisation — but it's not needed today.
+- **No gateway restart needed for store/topics/health.** They keep
+  using the existing warm daemon. Only recall semantics change.
+
 ## [0.4.8] — 2026-05-17
 
 **Recall quality fix — strip stopwords from the prefetch query before
