@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.8] — 2026-05-17
+
+**Recall quality fix — strip stopwords from the prefetch query before
+hitting ICM.**
+
+### Why
+
+The v0.4.7 INFO log made the failure mode unambiguous: natural-
+language queries like ``"what's the state of hair iron"`` returned a
+single unrelated ``preferences`` blob from ICM's MCP recall, while a
+bare ``"hair iron"`` returned 46 hits (including the relevant
+``context-hair-iron`` entries, although still poorly ranked). ICM's
+MCP-served recall tanks badly on full-sentence input vs keyword-only
+input. Until that's fixed upstream, the workaround belongs in the
+plugin.
+
+### Added
+
+- **``mapping.extract_recall_query(text)``** — pure heuristic that
+  lowercases, splits on the existing alnum-token regex, drops a
+  curated set of high-frequency English stopwords + sub-3-char
+  tokens, and joins the remainder with single spaces. Falls back to
+  the original ``text`` (trimmed) when extraction would yield an empty
+  string (so a fully-stopword query like ``"what is it"`` doesn't
+  collapse to zero hits).
+- **``mapping._STOPWORDS``** — short, deliberately conservative set
+  (articles, auxiliary verbs, pronouns + contractions, question
+  determiners, prepositions, ultra-common filler). Project-named
+  tokens (``hair``, ``iron``, ``nano``, etc.) MUST NOT appear here —
+  the comment in the module is explicit.
+
+### Changed
+
+- **``provider.prefetch`` now pre-processes the incoming query**
+  through ``extract_recall_query`` before passing it to
+  ``hooks.run_prefetch``. The new ``v0.4.7`` INFO log shows BOTH the
+  original message and the stripped form so operators can spot a
+  ``recall_query=''``-style misfire if the stopword list ever
+  over-strips.
+- **Cache key changed** from ``hash(query)`` to ``hash(recall_query)``
+  so the in-memory prefetch cache and ``_latest_prefetch_key`` line
+  up with what ``hooks.run_prefetch`` actually writes under.
+- Three pre-existing ``tests/test_hooks.py`` tests updated to expect
+  the post-strip query (``"how do I bun?"`` → ``"bun"``, etc.) — same
+  behaviour, just observable under the new strip.
+
 ## [0.4.7] — 2026-05-17
 
 **Observability — INFO log on every prefetch showing query + hit count

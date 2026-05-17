@@ -181,3 +181,46 @@ def test_topic_template_with_default_project() -> None:
     # And the literal '{project}' must never appear in any emitted topic.
     for trigger in decisions + context:
         assert "{project}" not in trigger[0]
+
+
+# ---------- v0.4.8: extract_recall_query (stopword stripping) ----------------
+
+
+def test_extract_recall_query_strips_stopwords() -> None:
+    """Natural-language question reduces to bare keywords."""
+    out = mapping.extract_recall_query("what's the state of hair iron")
+    # 'state', 'hair', 'iron' should survive; question words / 'of' should not.
+    assert out == "state hair iron"
+
+
+def test_extract_recall_query_keeps_keyword_only_input() -> None:
+    """Already-keyword input is unchanged (idempotent on clean queries)."""
+    out = mapping.extract_recall_query("hair iron project")
+    assert out == "hair iron project"
+
+
+def test_extract_recall_query_handles_punctuation_and_case() -> None:
+    """Punctuation drops; case normalises to lower."""
+    out = mapping.extract_recall_query("How's the Hair-Iron Project going?")
+    # Hyphenated 'Hair-Iron' tokenises as hair, iron via the alnum regex.
+    assert "hair" in out and "iron" in out and "project" in out
+    assert "?" not in out and "how" not in out
+
+
+def test_extract_recall_query_falls_back_when_all_stopwords() -> None:
+    """A fully-stopword input must NOT collapse to '' (would zero recall)."""
+    src = "what is it"
+    out = mapping.extract_recall_query(src)
+    assert out == "what is it", "must fall back to original when extraction empty"
+
+
+def test_extract_recall_query_empty_input_returns_empty() -> None:
+    """Empty input is preserved; not transformed into something weird."""
+    assert mapping.extract_recall_query("") == ""
+
+
+def test_extract_recall_query_drops_short_tokens() -> None:
+    """Tokens shorter than min_token_len (default 3) are dropped."""
+    out = mapping.extract_recall_query("io v0 ab hair iron")
+    # 'io', 'v0', 'ab' are < 3 chars; 'hair' and 'iron' survive.
+    assert out == "hair iron"

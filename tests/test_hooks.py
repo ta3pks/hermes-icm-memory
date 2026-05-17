@@ -102,7 +102,11 @@ def test_prefetch_calls_run_recall_with_config_limit_and_timeout(
     }
     initialized_provider.prefetch(query="how do I bun?")
 
-    assert captured["query"] == "how do I bun?"
+    # v0.4.8 — provider strips stopwords/short tokens before recall (ICM's
+    # MCP ranker behaves poorly on full-sentence queries). "how do I bun?"
+    # → "bun" (how/do/I are stopwords or below the 3-char floor; '?' is
+    # not alnum). Original message stays intact for cache keying and logs.
+    assert captured["query"] == "bun"
     assert captured["limit"] == 7
     assert captured["timeout_ms"] == 1234
     assert captured["db_path"] == initialized_provider._db_path
@@ -121,7 +125,9 @@ def test_prefetch_caches_result_for_block(
         lambda *a, **kw: [{"id": "m1", "topic": "preferences", "summary": "use bun"}],
     )
     initialized_provider.prefetch(query="bun?")
-    assert initialized_provider._prefetch_cache[hash("bun?")] == [
+    # v0.4.8 — cache is keyed on the post-strip recall_query. 'bun?' strips
+    # to 'bun' (punctuation drops, len-3 alnum survives, not a stopword).
+    assert initialized_provider._prefetch_cache[hash("bun")] == [
         {"id": "m1", "topic": "preferences", "summary": "use bun"}
     ]
 

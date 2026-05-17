@@ -32,7 +32,7 @@ from typing import Any, Final
 
 import yaml
 
-from . import cli_runner, config, hooks
+from . import cli_runner, config, hooks, mapping
 
 __all__ = ["IcmMemoryProvider"]
 
@@ -586,12 +586,22 @@ class IcmMemoryProvider:
         if not self.is_available():
             return ""
         recall_limit = self._config_int("recall_limit")
+        # v0.4.8 — pre-process the natural-language user message into a
+        # keyword-only query before calling ICM. ICM's MCP recall ranker
+        # behaves poorly on full-sentence input (a query like "what's the
+        # state of hair iron" returns a single unrelated ``preferences``
+        # blob, while "hair iron" returns the relevant entries). Stripping
+        # stopwords/short tokens client-side dramatically improves hit
+        # ranking on Pi-class hosts that run icm with ``--no-embeddings``.
+        # Falls back to the original on empty extraction (see
+        # ``mapping.extract_recall_query`` docstring).
+        recall_query = mapping.extract_recall_query(query)
         # v0.1.1: ``_db_path is None`` is a legitimate "use icm canonical
         # default DB" sentinel (default-shared mode), not a "not initialized"
         # signal. The ``_init_args`` check upstream handles the latter.
         try:
             hits = hooks.run_prefetch(
-                query=query,
+                query=recall_query,
                 db_path=self._db_path,
                 limit=recall_limit,
                 timeout_ms=self._config_int("command_timeout_read_ms"),
@@ -615,26 +625,29 @@ class IcmMemoryProvider:
         capped_count = len(hits[:recall_limit])
         self._worker_state.recent_recall_count = capped_count
         _capture_recall_count(capped_count)
-        # v0.4.7 — observability. Surface query + hit count so operators
-        # can diagnose "📚 — even though I asked about X" cases without
-        # having to instrument the plugin or replay queries against icm
-        # manually. Query is truncated to 120 chars to keep log lines
-        # readable; top hit topics included so dispatching/ranking issues
-        # (e.g. "ICM MCP recall returns context-nikos blob first instead
-        # of context-hair-iron") are visible at INFO.
+        # v0.4.7 — observability. Surface BOTH the original and the
+        # stopword-stripped query alongside the hit count and top topics
+        # so operators can diagnose either a bad stripped query or an
+        # ICM-side ranking miss without having to instrument the plugin.
         _q_preview = (query[:120] + "…") if len(query) > 120 else query
+        _rq_preview = (
+            (recall_query[:120] + "…") if len(recall_query) > 120 else recall_query
+        )
         _top_topics = ", ".join(
             str(h.get("topic") or "?") for h in hits[: min(3, recall_limit)]
         ) or "none"
         logger.info(
-            "prefetch: query=%r raw_hits=%d capped=%d top_topics=[%s]",
-            _q_preview, len(hits), capped_count, _top_topics,
+            "prefetch: query=%r recall_query=%r raw_hits=%d capped=%d top_topics=[%s]",
+            _q_preview, _rq_preview, len(hits), capped_count, _top_topics,
         )
         # Bound the cache to the latest entry. ``system_prompt_block`` only
         # reads ``_latest_prefetch_key`` (NFR-PERF-4), so older entries are
         # dead weight that would otherwise leak monotonically across the
-        # gateway's lifetime.
-        latest_key = hash(query)
+        # gateway's lifetime. v0.4.8 — cache key uses the STRIPPED query so
+        # it lines up with the key ``hooks.run_prefetch`` writes under
+        # (it hashes whatever query is passed in, which is ``recall_query``
+        # post-strip).
+        latest_key = hash(recall_query)
         self._prefetch_cache = {latest_key: self._prefetch_cache.get(latest_key, [])}
         self._latest_prefetch_key = latest_key
         # ``format_block`` returns ``""`` on empty hits — no extra short-circuit.

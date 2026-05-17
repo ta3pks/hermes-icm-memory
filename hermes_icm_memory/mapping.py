@@ -74,6 +74,80 @@ _LEARNINGS_PATTERN: Final[re.Pattern[str]] = re.compile(
 # Word tokenizer for keywords extraction. Lowercase a-z plus digits, length ≥ 3.
 _WORD_TOKEN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]{3,}")
 
+#: Stopwords stripped by :func:`extract_recall_query` before sending a query
+#: to ICM. ICM's MCP recall ranker tanks badly on natural-language phrasing
+#: (a query like "what's the state of hair iron" returns a single unrelated
+#: ``preferences`` blob, while "hair iron" returns the relevant entries) —
+#: this list lets the plugin pre-process the user's message into a
+#: keyword-only form before recall. Intentionally short: only the highest-
+#: frequency English function words. Project-named tokens (hair, iron,
+#: nano, etc.) MUST NOT appear here.
+_STOPWORDS: Final[frozenset[str]] = frozenset({
+    # articles
+    "the", "a", "an",
+    # auxiliary / linking verbs
+    "is", "are", "was", "were", "be", "been", "being",
+    "am", "do", "does", "did", "doing", "done",
+    "has", "have", "had", "having",
+    "can", "could", "may", "might", "must", "shall", "should",
+    "will", "would",
+    # personal pronouns + common contractions
+    "i", "me", "my", "mine", "myself",
+    "we", "us", "our", "ours", "ourselves",
+    "you", "your", "yours", "yourself", "yourselves",
+    "he", "him", "his", "himself",
+    "she", "her", "hers", "herself",
+    "it", "its", "itself",
+    "they", "them", "their", "theirs", "themselves",
+    "ive", "youre", "youve", "hes", "shes", "weve", "theyre",
+    "thats", "whats", "wheres", "hows", "lets",
+    # question / determiners
+    "what", "who", "whom", "whose", "which", "where", "when",
+    "why", "how", "this", "that", "these", "those",
+    # prepositions / conjunctions
+    "of", "in", "on", "at", "by", "to", "for", "with", "from",
+    "about", "into", "onto", "over", "under", "out", "off",
+    "up", "down", "as", "than", "then", "but", "and", "or", "if",
+    "so", "yet", "nor", "not", "any", "all", "some",
+    # ultra-common filler
+    "just", "now", "still", "also", "very", "too", "more", "much",
+    "really", "okay", "ok", "well", "right",
+})
+
+
+def extract_recall_query(text: str, *, min_token_len: int = 3) -> str:
+    """Strip stopwords + short tokens from a natural-language message.
+
+    ICM's MCP recall ranker behaves poorly on full-sentence queries; bare
+    keywords give dramatically better hit ranking on keyword-only mode
+    (which is what the plugin runs on Pi-class hardware per the operator's
+    ``use_embeddings: false`` setting). This helper produces the
+    keyword-only form.
+
+    Behaviour:
+
+    - Lowercases.
+    - Splits on the same ``_WORD_TOKEN`` regex as
+      :func:`_extract_keywords` (alphanumeric runs ≥ ``min_token_len``).
+    - Drops tokens in :data:`_STOPWORDS`.
+    - Joins remaining tokens with a single space.
+    - **Falls back to the original** ``text`` (trimmed) when extraction
+      yields an empty string — a fully-stopword query (e.g. ``"what is
+      it"``) becomes nothing, and an empty recall query would return
+      zero hits, which is strictly worse than the original behaviour.
+
+    Pure heuristic — no I/O, no logging, no dependencies.
+    """
+    if not text:
+        return text
+    tokens = [
+        t for t in _WORD_TOKEN.findall(text.lower())
+        if len(t) >= min_token_len and t not in _STOPWORDS
+    ]
+    if not tokens:
+        return text.strip()
+    return " ".join(tokens)
+
 
 def _resolve_topic(category: str, project: str | None) -> str:
     """Format the category's topic_template, substituting 'default' for None."""
